@@ -1,0 +1,17 @@
+[provider]
+cluster = "devnet"
+wallet = "./deployer-keypair.json"
+
+[programs.localnet]
+seth_bridge = "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS"
+
+[programs.devnet]
+seth_bridge = "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS"
+
+[scripts]
+initialize = "node scripts/initialize.js"
+test = "node scripts/test.js"
+
+[[test.validator.account]]
+address = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+filename = "./accounts/spl-token.json"

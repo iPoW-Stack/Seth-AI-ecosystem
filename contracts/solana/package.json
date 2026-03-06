@@ -1,0 +1,29 @@
+{
+  "name": "seth-solana-bridge",
+  "version": "1.0.0",
+  "description": "Seth-Solana Cross-Chain Bridge with 15-50-35 Revenue Distribution",
+  "scripts": {
+    "build": "anchor build",
+    "deploy": "anchor deploy",
+    "test": "anchor test",
+    "deploy:full": "node scripts/deploy.js",
+    "init": "node scripts/initialize.js",
+    "dirm:create": "node scripts/create-dirm.js",
+    "clean": "rm -rf target node_modules"
+  },
+  "dependencies": {
+    "@project-serum/anchor": "^0.26.0",
+    "@solana/spl-token": "^0.3.8",
+    "@solana/web3.js": "^1.87.0",
+    "bs58": "^5.0.0",
+    "undici": "^7.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
