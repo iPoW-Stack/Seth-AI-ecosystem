@@ -1,12 +1,7 @@
 {
+  "programId": "5V3anofFhgpB9D8Uc72JDHg1VVH8qxJJrtaEMMxS4kmw",
   "cluster": "devnet",
-  "deployer": "69ARjWMWFgpnH71N1Cogr3BR5VBy7fsT4sMgAKFqRj4j",
-  "dirmMint": "D11MfeaKoFn7oRiELbsg5qe362QQ1144vmTgq7pPXUEK",
-  "teamWallet": "7J4pz8SaSc4kJCaSCeuAXp4Lb9eXtwzSWLG8ww3EuPMJ",
-  "teamTokenAccount": "FXhva7SctKgjRuTv1QuzyXWJDBLyHBNnAYxTbhXBubdL",
-  "projectWallet": "4k4o4neU92sbbWiK9nud5HxwMHiMpDdbqBn4osyftyxP",
-  "projectTokenAccount": "DcyhZvtYkFWjTzYADn4MDTvcdBVywXcf1HHhNoXC9YrR",
-  "teamWalletSecret": "dwUSzfzuB7w7/Nhi+R6X8bU/gZKErEdPjhLmSddEKZJdhVKolfN5WDiwl4SADNSVX1RlBrFiVKHtKd1K2bOkYQ==",
-  "projectWalletSecret": "Pmv6sFQLkBHOwcgzjYLD5IJTE/zP8pebkKQxEHDhwh03m1NiP7H36Jke7EFao/OoW9HTZB8VzcmsLGtCRICmRA==",
-  "createdAt": "2026-03-06T01:02:30.915Z"
+  "rpcUrl": "https://api.devnet.solana.com",
+  "deployedAt": "2026-03-06T23:47:00.587Z",
+  "deployer": "69ARjWMWFgpnH71N1Cogr3BR5VBy7fsT4sMgAKFqRj4j"
 }

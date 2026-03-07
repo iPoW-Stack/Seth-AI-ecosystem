@@ -3,10 +3,10 @@ cluster = "devnet"
 wallet = "./deployer-keypair.json"
 
 [programs.localnet]
-seth_bridge = "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS"
+seth_bridge = "5V3anofFhgpB9D8Uc72JDHg1VVH8qxJJrtaEMMxS4kmw"
 
 [programs.devnet]
-seth_bridge = "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS"
+seth_bridge = "5V3anofFhgpB9D8Uc72JDHg1VVH8qxJJrtaEMMxS4kmw"
 
 [scripts]
 initialize = "node scripts/initialize.js"

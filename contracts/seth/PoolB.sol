@@ -270,7 +270,7 @@ contract PoolB {
                 timestamp: block.timestamp,
                 price: currentPrice,
                 volume: volume
-            });
+            }));
         }
     }
 

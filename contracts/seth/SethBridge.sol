@@ -54,6 +54,9 @@ contract SethBridge {
     // 重放保护：记录已处理的 Solana 交易签名
     mapping(bytes32 => bool) public processedTxs;
     
+    // Solana USDC 6 位小数 → seth sUSDC 18 位小数
+    uint256 public constant DECIMALS_SCALE = 1e12;
+    
     // 统计
     uint256 public totalInjectedToPoolB;
     uint256 public totalTransactions;
@@ -112,37 +115,40 @@ contract SethBridge {
     /**
      * @dev 注入 35% 生态资金到 PoolB
      * @param solanaTxSig Solana 交易签名 (防重放)
-     * @param amountSUSDC sUSDC 金额 (35% 生态资金)
+     * @param amountFromSolana 来自 Solana 的 35% 金额（6 位小数，与 CrossChainMessage.amount 一致）
      * @param amountSETH 原生 SETH 金额 (随交易发送，用于配对注入)
      */
     function injectEcosystemFunds(
         bytes32 solanaTxSig,
-        uint256 amountSUSDC,
+        uint256 amountFromSolana,
         uint256 amountSETH
     ) external payable onlyRelayer {
         // 1. 验证
         require(!processedTxs[solanaTxSig], "SethBridge: Transaction already processed");
         require(poolB != address(0), "SethBridge: PoolB not set");
-        require(amountSUSDC > 0, "SethBridge: Zero sUSDC amount");
+        require(amountFromSolana > 0, "SethBridge: Zero amount from Solana");
         require(msg.value >= amountSETH, "SethBridge: Insufficient native SETH");
         require(amountSETH > 0, "SethBridge: Zero SETH amount");
         
         // 2. 记录已处理
         processedTxs[solanaTxSig] = true;
         
-        // 3. 铸造 sUSDC 到本合约
+        // 3. Solana USDC 6 位 → seth sUSDC 18 位
+        uint256 amountSUSDC = amountFromSolana * DECIMALS_SCALE;
+        
+        // 4. 铸造 sUSDC 到本合约
         _mintSUSDC(address(this), amountSUSDC);
         
-        // 4. 授权 PoolB 使用 sUSDC
+        // 5. 授权 PoolB 使用 sUSDC
         _approve(sUSDC, poolB, amountSUSDC);
         
-        // 5. 调用 PoolB 添加流动性（发送原生 SETH）
+        // 6. 调用 PoolB 添加流动性（发送原生 SETH）
         (bool success, ) = poolB.call{value: amountSETH}(
             abi.encodeWithSignature("addLiquidity(uint256)", amountSUSDC)
         );
         require(success, "SethBridge: Failed to add liquidity to PoolB");
         
-        // 6. 更新统计
+        // 7. 更新统计（按 18 位 sUSDC 记录）
         totalInjectedToPoolB += amountSUSDC;
         totalTransactions++;
         
@@ -151,6 +157,7 @@ contract SethBridge {
 
     /**
      * @dev 执行普通跨链铸造（备用，给用户或 Treasury）
+     * @param amount 来自 Solana 的金额（6 位小数），合约内会换算为 sUSDC 18 位
      */
     function executeUnlock(
         bytes32 solanaTxSig,
@@ -163,11 +170,12 @@ contract SethBridge {
         
         processedTxs[solanaTxSig] = true;
         
-        _mintSUSDC(recipient, amount);
+        uint256 amountSUSDC = amount * DECIMALS_SCALE;
+        _mintSUSDC(recipient, amountSUSDC);
         
         totalTransactions++;
         
-        emit EcosystemFundsInjected(solanaTxSig, amount, 0, block.timestamp);
+        emit EcosystemFundsInjected(solanaTxSig, amountSUSDC, 0, block.timestamp);
     }
 
     // ==================== 内部函数 ====================

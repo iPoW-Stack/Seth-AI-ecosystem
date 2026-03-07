@@ -38,7 +38,7 @@ contract sUSDC {
     
     string public constant name = "Seth USDC";
     string public constant symbol = "sUSDC";
-    uint8 public constant decimals = 18;
+    uint8 public constant decimals = 6;
     uint256 public totalSupply;
     
     mapping(address => uint256) public balanceOf;
