@@ -1,15 +1,15 @@
 /**
- * BSC-Solana 高并发跨链桥 Relayer V2
+ * BSC-Solana High-Concurrency Cross-Chain Bridge Relayer V2
  * 
- * 优化特性：
- * 1. 消息队列机制 - 内存队列 + 数据库持久化
- * 2. 批量处理 - 并发处理多条消息
- * 3. 工作池模式 - 多个 worker 并发处理
- * 4. 限流和背压控制 - 防止系统过载
- * 5. 优雅降级 - 高负载时自动调整
- * 6. 健康检查和监控
- * 7. 死信队列 - 处理永久失败的消息
- * 8. Nonce 管理 - 防止 nonce 冲突
+ * Optimized Features:
+ * 1. Message Queue Mechanism - Memory queue + Database persistence
+ * 2. Batch Processing - Concurrent processing of multiple messages
+ * 3. Worker Pool Pattern - Multiple workers for concurrent processing
+ * 4. Rate Limiting and Backpressure Control - Prevent system overload
+ * 5. Graceful Degradation - Automatic adjustment under high load
+ * 6. Health Check and Monitoring
+ * 7. Dead Letter Queue - Handle permanently failed messages
+ * 8. Nonce Management - Prevent nonce conflicts
  */
 
 require('dotenv').config({ path: '.env.bsc' });
@@ -21,7 +21,7 @@ const { Buffer } = require('buffer');
 const createKeccakHash = require('keccak');
 const EventEmitter = require('events');
 
-// ==================== 配置 ====================
+// ==================== Configuration ====================
 const CONFIG = {
     solana: {
         rpcUrl: process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com',
@@ -29,7 +29,7 @@ const CONFIG = {
         commitment: 'confirmed',
         pollInterval: parseInt(process.env.SOLANA_POLL_INTERVAL) || 3000,
         proxy: process.env.SOLANA_HTTP_PROXY || process.env.SOLANA_PROXY || null,
-        // 并发获取交易详情的并发数
+        // Concurrency level for fetching transaction details
         fetchConcurrency: parseInt(process.env.SOLANA_FETCH_CONCURRENCY) || 5,
     },
     bsc: {
@@ -54,16 +54,16 @@ const CONFIG = {
         retryInterval: parseInt(process.env.RETRY_INTERVAL) || 60000,
         batchSize: parseInt(process.env.BATCH_SIZE) || 20,
         confirmationBlocks: parseInt(process.env.CONFIRMATION_BLOCKS) || 3,
-        // 高并发配置
-        workerCount: parseInt(process.env.WORKER_COUNT) || 5,           // worker 数量
-        queueSize: parseInt(process.env.QUEUE_SIZE) || 1000,            // 内存队列大小
-        txConcurrency: parseInt(process.env.TX_CONCURRENCY) || 3,       // 同时发送交易数
-        maxPollRate: parseInt(process.env.MAX_POLL_RATE) || 100,        // 每秒最大轮询数
-        healthCheckInterval: parseInt(process.env.HEALTH_CHECK_INTERVAL) || 10000,
+        // High-concurrency configuration
+        workerCount: parseInt(process.env.WORKER_COUNT) || 5,           // Number of workers
+        queueSize: parseInt(process.env.QUEUE_SIZE) || 1000,            // Memory queue size
+        txConcurrency: parseInt(process.env.TX_CONCURRENCY) || 3,       // Concurrent transaction sending
+        maxPollRate: parseInt(process.env.MAX_POLL_RATE) || 100,        // Maximum poll rate per second
+        healthCheckInterval: parseInt(process.env.HEALTH_CHECK_INTERVAL) || 10000, // Health check interval
     }
 };
 
-// ==================== 消息队列类 ====================
+// ==================== Message Queue Class ====================
 class MessageQueue extends EventEmitter {
     constructor(maxSize = 1000) {
         super();
@@ -90,7 +90,7 @@ class MessageQueue extends EventEmitter {
             return false;
         }
 
-        // 检查是否已在队列中
+        // Check if already exists in the queue
         const exists = this.queue.some(m => m.solana_tx_sig === message.solana_tx_sig);
         if (exists) {
             return false;
@@ -128,7 +128,7 @@ class MessageQueue extends EventEmitter {
 
     requeue(message) {
         this.processing.delete(message.solana_tx_sig);
-        this.queue.unshift(message); // 优先处理
+        this.queue.unshift(message); // Prioritize processing
         this.emit('requeue', message);
     }
 
@@ -150,7 +150,7 @@ class MessageQueue extends EventEmitter {
     }
 }
 
-// ==================== Nonce 管理器 ====================
+// ==================== Nonce Manager ====================
 class NonceManager {
     constructor(provider, address) {
         this.provider = provider;
@@ -191,11 +191,11 @@ class NonceManager {
     }
 
     releaseNonce(nonce) {
-        // Nonce 已使用，无需释放
+        // Nonce has already been used, no need to release
     }
 }
 
-// ==================== 限流器 ====================
+// ==================== Rate Limiter ====================
 class RateLimiter {
     constructor(maxRequestsPerSecond) {
         this.maxRps = maxRequestsPerSecond;
@@ -218,7 +218,7 @@ class RateLimiter {
             return true;
         }
 
-        // 等待下一个 token
+        // Wait for the next token
         const waitTime = this.interval - (now - this.lastRefill);
         if (waitTime > 0) {
             await new Promise(resolve => setTimeout(resolve, waitTime));
@@ -235,7 +235,7 @@ class RateLimiter {
     }
 }
 
-// ==================== 高并发 Relayer 类 ====================
+// ==================== High-Concurrency Relayer Class ====================
 class HighConcurrencyBscRelayer {
     constructor() {
         this.db = null;
@@ -243,16 +243,16 @@ class HighConcurrencyBscRelayer {
         this.bscClient = null;
         this.relayerAddress = null;
         
-        // 高并发组件
+        // High-concurrency components
         this.messageQueue = new MessageQueue(CONFIG.relayer.queueSize);
         this.nonceManager = null;
         this.rateLimiter = new RateLimiter(CONFIG.relayer.maxPollRate);
         
-        // 控制标志
+        // Control flags
         this.isRunning = false;
         this.isShuttingDown = false;
         
-        // 定时器
+        // Timers
         this.timers = {
             poll: null,
             retry: null,
@@ -261,11 +261,11 @@ class HighConcurrencyBscRelayer {
             nonce: null
         };
         
-        // 工作池
+        // Worker pool
         this.workers = [];
         this.activeTxCount = 0;
         
-        // 统计
+        // Statistics
         this.stats = {
             startTime: null,
             totalDetected: 0,
@@ -276,7 +276,7 @@ class HighConcurrencyBscRelayer {
             processTimes: []
         };
 
-        // 绑定队列事件
+        // Event handlers for the message queue
         this.setupQueueEvents();
     }
 
@@ -293,7 +293,7 @@ class HighConcurrencyBscRelayer {
     async initialize() {
         console.log('[RelayerV2] Initializing high-concurrency relayer...');
         
-        // 1. 初始化数据库
+        // 1. Initialize database
         this.db = new Database(CONFIG.database);
         const dbConnected = await this.db.testConnection();
         if (!dbConnected) {
@@ -301,7 +301,7 @@ class HighConcurrencyBscRelayer {
         }
         await this.db.runMigrations();
 
-        // 2. 初始化 Solana 连接
+        // 2. Initialize Solana connection
         const connOptions = { commitment: CONFIG.solana.commitment };
         if (CONFIG.solana.proxy) {
             const { HttpsProxyAgent } = require('https-proxy-agent');
@@ -309,7 +309,7 @@ class HighConcurrencyBscRelayer {
         }
         this.solanaConn = new Connection(CONFIG.solana.rpcUrl, connOptions);
 
-        // 3. 初始化 BSC 客户端
+        // 3. Initialize BSC client
         this.bscClient = new BscClient(
             CONFIG.bsc.rpcUrl,
             CONFIG.bsc.privateKey,
@@ -326,18 +326,18 @@ class HighConcurrencyBscRelayer {
         
         this.relayerAddress = this.bscClient.relayerAddress;
 
-        // 4. 初始化 Nonce 管理器
+        // 4. Initialize Nonce manager
         this.nonceManager = new NonceManager(this.bscClient.provider, this.relayerAddress);
         await this.nonceManager.initialize();
 
-        // 5. 验证余额
+        // 5. Verify balance
         const balance = await this.bscClient.getBalance(this.relayerAddress);
         console.log(`[RelayerV2] Relayer balance: ${await this.bscClient.getBalanceInBNB(this.relayerAddress)} tBNB`);
 
-        // 6. 更新数据库状态
+        // 6. Update database status
         await this.db.updateRelayerStatus({ relayerAddress: this.relayerAddress });
 
-        // 7. 初始化工作池
+        // 7. Initialize worker pool
         this.initWorkerPool();
 
         console.log('[RelayerV2] Initialization complete');
@@ -372,14 +372,14 @@ class HighConcurrencyBscRelayer {
 
         await this.db.setRelayerActive(true);
 
-        // 启动各个组件
+        // Start various components
         this.startSolanaListener();
         this.startRetryScheduler();
         this.startHealthCheck();
         this.startStatsReporter();
         this.startNonceRefresher();
 
-        // 处理启动时遗留的消息
+        // Process pending messages left from previous runs
         await this.loadPendingMessages();
 
         console.log('[RelayerV2] Started successfully');
@@ -392,7 +392,7 @@ class HighConcurrencyBscRelayer {
         this.isShuttingDown = true;
         this.isRunning = false;
 
-        // 停止所有定时器
+        // Stop all timers
         for (const [name, timer] of Object.entries(this.timers)) {
             if (timer) {
                 clearInterval(timer);
@@ -401,7 +401,7 @@ class HighConcurrencyBscRelayer {
             }
         }
 
-        // 等待正在处理的交易完成
+        // Wait for all active transactions to complete
         while (this.activeTxCount > 0) {
             console.log(`[RelayerV2] Waiting for ${this.activeTxCount} transactions to complete...`);
             await new Promise(resolve => setTimeout(resolve, 1000));
@@ -418,12 +418,12 @@ class HighConcurrencyBscRelayer {
         console.log('[RelayerV2] Shutdown complete');
     }
 
-    // ==================== Solana 监听 ====================
+    // ==================== Solana Listener ====================
 
     startSolanaListener() {
         const programId = new PublicKey(CONFIG.solana.programId);
 
-        // WebSocket 实时监听
+        // WebSocket real-time listening
         this.solanaConn.onLogs(
             programId,
             async (logs, ctx) => {
@@ -433,7 +433,7 @@ class HighConcurrencyBscRelayer {
             CONFIG.solana.commitment
         );
 
-        // 轮询备份机制
+        // Polling backup mechanism
         this.timers.poll = setInterval(async () => {
             if (this.isShuttingDown) return;
             await this.pollSolanaTransactions();
@@ -455,11 +455,11 @@ class HighConcurrencyBscRelayer {
 
             const txSignature = ctx.signature;
             
-            // 快速检查是否已处理
+            // Quickly check if already processed
             const alreadyProcessed = await this.db.isProcessed(txSignature);
             if (alreadyProcessed) return;
 
-            // 异步解析交易，不阻塞
+            // Asynchronously parse transaction, do not block
             this.parseAndQueueTransaction(txSignature, 'websocket');
 
         } catch (error) {
@@ -480,7 +480,7 @@ class HighConcurrencyBscRelayer {
                 CONFIG.solana.commitment
             );
 
-            // 并发处理签名
+            // Concurrency handling of signatures
             const chunks = this.chunkArray(signatures.reverse(), CONFIG.solana.fetchConcurrency);
             
             for (const chunk of chunks) {
@@ -493,7 +493,7 @@ class HighConcurrencyBscRelayer {
 
                 await Promise.allSettled(promises);
 
-                // 更新最后处理的签名
+                // Update last processed signature
                 if (chunk.length > 0) {
                     const lastSig = chunk[chunk.length - 1].signature;
                     await this.db.updateRelayerStatus({ lastProcessedSignature: lastSig });
@@ -507,7 +507,7 @@ class HighConcurrencyBscRelayer {
 
     async parseAndQueueTransaction(txSignature, source) {
         try {
-            // 检查是否已在队列或已处理
+            // Check if already in queue or processed
             if (this.messageQueue.processing.has(txSignature)) return;
 
             const existingMsg = await this.db.getMessageBySig(txSignature);
@@ -516,11 +516,11 @@ class HighConcurrencyBscRelayer {
             const messageData = await this.parseSolanaTransaction(txSignature);
             if (!messageData) return;
 
-            // 保存到数据库
+            // Save to database
             const savedMessage = await this.db.insertMessage(messageData);
-            if (!savedMessage) return; // 可能已存在
+            if (!savedMessage) return; // Possible duplicate
 
-            // 加入内存队列
+            // Add to memory queue
             const queued = this.messageQueue.enqueue(savedMessage);
             
             if (queued) {
@@ -649,32 +649,32 @@ class HighConcurrencyBscRelayer {
         }
     }
 
-    // ==================== 工作池调度 ====================
+    // ==================== Worker Pool Dispatch ====================
 
     async dispatchToWorker() {
-        // 检查交易并发限制
+        // Check transaction concurrency limit
         if (this.activeTxCount >= CONFIG.relayer.txConcurrency) {
             return;
         }
 
-        // 找到空闲 worker
+        // Find idle worker
         const worker = this.workers.find(w => !w.busy);
         if (!worker) return;
 
-        // 从队列获取消息
+        // Get message from queue
         const message = this.messageQueue.dequeue();
         if (!message) return;
 
         worker.busy = true;
         this.activeTxCount++;
 
-        // 异步处理，不阻塞
+        // Asynchronously process, do not block
         this.processMessageAsync(message, worker)
             .catch(err => console.error(`[Worker${worker.id}] Unhandled error:`, err))
             .finally(() => {
                 worker.busy = false;
                 this.activeTxCount--;
-                // 尝试处理下一条消息
+                // Try processing next message
                 this.dispatchToWorker();
             });
     }
@@ -694,7 +694,7 @@ class HighConcurrencyBscRelayer {
                 amountBNB
             );
 
-            // 获取 nonce
+            // Get nonce
             const nonce = await this.nonceManager.getNextNonce();
 
             const txOptions = {
@@ -716,7 +716,7 @@ class HighConcurrencyBscRelayer {
             if (result.success) {
                 console.log(`[Worker${worker.id}] TX sent: ${result.txHash}`);
 
-                // 等待确认
+                // Wait for confirmation
                 const receipt = await this.bscClient.waitReceipt(result.txHash, 30, 2000);
 
                 if (receipt && receipt.status === 0) {
@@ -733,7 +733,7 @@ class HighConcurrencyBscRelayer {
                 this.stats.totalProcessed++;
                 this.stats.totalRevenueProcessed += Number(amountFromSolana) / 1e6;
 
-                // 记录处理时间
+                // Record processing time
                 const processTime = Date.now() - startTime;
                 this.stats.processTimes.push(processTime);
                 if (this.stats.processTimes.length > 100) {
@@ -754,13 +754,13 @@ class HighConcurrencyBscRelayer {
             const retryCount = message.retry_count || 0;
 
             if (isRetryable && retryCount < CONFIG.relayer.maxRetries) {
-                // 刷新 nonce 并重试
+                // Refresh nonce and retry
                 await this.nonceManager.refreshNonce();
                 
                 await this.db.markAsFailed(message.id, error.message, CONFIG.relayer.maxRetries);
                 console.log(`[Worker${worker.id}] Will retry (attempt ${retryCount + 1}/${CONFIG.relayer.maxRetries})`);
             } else {
-                // 移到死信队列
+                // Move to dead letter queue
                 this.messageQueue.moveToDeadLetter(message, error.message);
                 await this.db.markAsFailed(message.id, `Permanent failure: ${error.message}`, 0);
             }
@@ -792,7 +792,7 @@ class HighConcurrencyBscRelayer {
         return retryable.some(p => msg.includes(p)) || true;
     }
 
-    // ==================== 重试调度器 ====================
+    // ==================== Retry Scheduler ====================
 
     startRetryScheduler() {
         this.timers.retry = setInterval(async () => {
@@ -811,7 +811,7 @@ class HighConcurrencyBscRelayer {
             console.log(`[RelayerV2] Loading ${messages.length} messages for retry`);
 
             for (const message of messages) {
-                // 重新加入队列
+                // Re-enqueue the message
                 this.messageQueue.enqueue(message);
             }
         } catch (error) {
@@ -832,7 +832,7 @@ class HighConcurrencyBscRelayer {
         }
     }
 
-    // ==================== 健康检查 ====================
+    // ==================== Health Check ====================
 
     startHealthCheck() {
         this.timers.health = setInterval(() => {
@@ -844,16 +844,16 @@ class HighConcurrencyBscRelayer {
 
     async performHealthCheck() {
         try {
-            // 检查队列状态
+            // Check queue status
             const queueStats = this.messageQueue.getStats();
 
-            // 检查 worker 状态
+            // Check worker status
             const busyWorkers = this.workers.filter(w => w.busy).length;
 
-            // 检查 BSC 连接
+            // Check BSC connection
             const blockNumber = await this.bscClient.getBlockNumber();
 
-            // 检查余额
+            // Check balance
             const balance = await this.bscClient.getBalance(this.relayerAddress);
             const balanceBNB = Number(balance) / 1e18;
 
@@ -877,7 +877,7 @@ class HighConcurrencyBscRelayer {
                 }
             };
 
-            // 警告检查
+            // Warning checks
             if (balanceBNB < 0.1) {
                 console.warn(`[HealthCheck] LOW BALANCE: ${balanceBNB.toFixed(4)} tBNB`);
             }
@@ -886,7 +886,7 @@ class HighConcurrencyBscRelayer {
                 console.warn(`[HealthCheck] Dead letter queue growing: ${queueStats.deadLetterLength}`);
             }
 
-            // 输出健康状态
+            // Log health status
             console.log(`[HealthCheck] OK - Block: ${blockNumber}, Queue: ${queueStats.queueLength}, Active: ${this.activeTxCount}, Balance: ${balanceBNB.toFixed(4)} tBNB`);
 
             return health;
@@ -897,22 +897,22 @@ class HighConcurrencyBscRelayer {
         }
     }
 
-    // ==================== Nonce 刷新 ====================
+    // ==================== Nonce Refresher ====================
 
     startNonceRefresher() {
         this.timers.nonce = setInterval(async () => {
             await this.nonceManager.refreshNonce();
-        }, 30000); // 每30秒刷新一次
+        }, 30000); // Every 30 seconds
 
         console.log('[RelayerV2] Nonce refresher started');
     }
 
-    // ==================== 统计报告 ====================
+    // ==================== Stats Reporter ====================
 
     startStatsReporter() {
         this.timers.stats = setInterval(() => {
             this.reportStats();
-        }, 60000);
+        }, 60000); // Every 60 seconds
 
         console.log('[RelayerV2] Stats reporter started');
     }
@@ -933,7 +933,7 @@ class HighConcurrencyBscRelayer {
         console.log('[RelayerV2] =====================');
     }
 
-    // ==================== 工具方法 ====================
+    // ==================== Utility Methods ====================
 
     chunkArray(array, size) {
         const chunks = [];
@@ -943,7 +943,7 @@ class HighConcurrencyBscRelayer {
         return chunks;
     }
 
-    // 获取当前状态（供外部调用）
+    // Get current status (for external use, e.g. API endpoints, etc.)
     getStatus() {
         return {
             isRunning: this.isRunning,
@@ -966,7 +966,7 @@ class HighConcurrencyBscRelayer {
     }
 }
 
-// ==================== 主程序入口 ====================
+// ==================== Main Program Entry ====================
 
 async function main() {
     const relayer = new HighConcurrencyBscRelayer();

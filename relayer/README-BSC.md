@@ -1,98 +1,98 @@
-# BSC-Solana 跨链桥 Relayer
+# BSC-Solana Cross-Chain Bridge Relayer
 
-基于原有的 Seth-Solana 跨链桥，新增 BSC 测试网版本，用于在 BSC 测试网不稳定时进行测试。
+Based on the original Seth-Solana cross-chain bridge, added BSC testnet version for testing when BSC testnet is unstable.
 
-## 版本说明
+## Version Description
 
-| 版本 | 文件 | 说明 | 适用场景 |
+| Version | File | Description | Use Case |
 |------|------|------|---------|
-| V1 | `bsc-relayer.js` | 基础版本 | 低并发、简单测试 |
-| V2 | `bsc-relayer-v2.js` | 高并发版本 | 生产环境、大量用户 |
+| V1 | `bsc-relayer.js` | Basic version | Low concurrency, simple testing |
+| V2 | `bsc-relayer-v2.js` | High-concurrency version | Production environment, high volume |
 
-## 目录结构
+## Directory Structure
 
 ```
 relayer/
-├── relayer.js           # Seth-Solana 跨链桥 (原版本)
-├── sethClient.js        # Seth 链客户端 (原版本)
-├── bsc-relayer.js       # BSC-Solana 跨链桥 V1 (基础版本)
-├── bsc-relayer-v2.js    # BSC-Solana 跨链桥 V2 (高并发版本)
-├── bscClient.js         # BSC 测试网客户端
-├── .env.example         # Seth 版本配置示例
-├── .env.bsc.example     # BSC 版本配置示例
+├── relayer.js # Seth-Solana bridge (original version)
+├── sethClient.js # Seth chain client (original version)
+├── bsc-relayer.js # BSC-Solana bridge V1 (basic version)
+├── bsc-relayer-v2.js # BSC-Solana bridge V2 (high-concurrency version)
+├── bscClient.js # BSC testnet client
+├── .env.example # Seth version config example
+├── .env.bsc.example # BSC version config example
 └── db/
-    └── database.js      # 共用的数据库模块
+└── database.js # Shared database module
 ```
 
-## 快速开始
+## Quick Start
 
-### 1. 安装依赖
+### 1. Install Dependencies
 
 ```bash
 cd relayer
 npm install
 ```
 
-### 2. 配置 BSC Relayer
+### 2. Configure BSC Relayer
 
 ```bash
-# 复制配置文件
+# Copy configuration file
 cp .env.bsc.example .env.bsc
 
-# 编辑配置文件
-# 填入你的私钥和合约地址
+# Edit configuration file
+# Fill in your private key and contract address
 nano .env.bsc
 ```
 
-### 3. 创建数据库
+### 3. Create Database
 
 ```bash
-# 创建 PostgreSQL 数据库
+# Create PostgreSQL database
 createdb -U postgres bridge_relayer_bsc
 
-# 初始化数据库表
+# Initialize database tables
 psql -U postgres -d bridge_relayer_bsc -f db/init.sql
 ```
 
-### 4. 获取测试网 tBNB
+### 4. Get Testnet tBNB
 
-从 BSC 测试网水龙头获取 tBNB:
+Get tBNB from BSC testnet faucet:
 - https://testnet.binance.org/faucet-smart
 - https://testnet.bscscan.com/faucet
 
-### 5. 启动 Relayer
+### 5. Start Relayer
 
 ```bash
-# 启动 BSC V1 版本 (基础版)
+# Start BSC V1 version (Basic)
 npm run start:bsc
 
-# 启动 BSC V2 版本 (高并发版)
+# Start BSC V2 version (High-Concurrency)
 npm run start:bsc:v2
 
-# 或使用开发模式 (自动重启)
+# Or use development mode (auto-restart)
 npm run dev:bsc      # V1
 npm run dev:bsc:v2   # V2
 ```
 
-## V2 高并发版本特性
+## V2 High-Concurrency Version Features
 
-### 架构设计
+### Architecture Design
 
 ```
                     ┌─────────────────────┐
-                    │   Solana 区块链     │
+                    │   Solana Blockchain     │
                     └──────────┬──────────┘
                                │
                     ┌──────────▼──────────┐
-                    │   事件监听器 (WS+轮询) │
+                    │   Event Listener (WS+Poll) │
                     └──────────┬──────────┘
                                │
                     ┌──────────▼──────────┐
-                    │    限流器 (RateLimiter)   │
+                    │    RateLimiter   │
                     └──────────┬──────────┘
                                │
                     ┌──────────▼──────────┐
-                    │   消息队列 (MessageQueue)  │
+                    │   MessageQueue  │
                     └──────────┬──────────┘
                                │
           ┌────────────────────┼────────────────────┐
@@ -104,88 +104,88 @@ npm run dev:bsc:v2   # V2
           └────────────────────┼────────────────────┘
                                │
                     ┌──────────▼──────────┐
-                    │  Nonce 管理器 (NonceManager) │
+                    │  NonceManager │
                     └──────────┬──────────┘
                                │
                     ┌──────────▼──────────┐
-                    │     BSC 区块链      │
+                    │     BSC Blockchain      │
                     └─────────────────────┘
 ```
 
-### 核心组件
+### Core Components
 
-| 组件 | 类名 | 功能 |
+| Component | Class Name | Function |
 |------|------|------|
-| 消息队列 | `MessageQueue` | 内存队列 + 死信队列 |
-| Nonce 管理器 | `NonceManager` | 防止 nonce 冲突 |
-| 限流器 | `RateLimiter` | 令牌桶限流 |
-| 工作池 | Worker Pool | 多 worker 并发处理 |
+| Message Queue | `MessageQueue` | Memory queue + Dead letter queue |
+| NonceManager | `NonceManager` | Prevent nonce conflicts |
+| Rate Limiter | `RateLimiter` | Token bucket rate limiting |
+| Worker Pool | Worker Pool | Multi-worker concurrent processing |
 
-### 高并发配置
+### High-Concurrency Configuration并发配置
 
 ```env
 # .env.bsc
 
-# Worker 数量（并发处理线程）
+# Number of workers (concurrent processing threads)
 WORKER_COUNT=5
 
-# 内存队列大小
+# Memory queue size
 QUEUE_SIZE=1000
 
-# 同时发送的交易数量
+# Number of concurrent transactions
 TX_CONCURRENCY=3
 
-# 每秒最大轮询数
+# Maximum polls per second
 MAX_POLL_RATE=100
 
-# Solana 交易获取并发数
+# Solana transaction fetch concurrency
 SOLANA_FETCH_CONCURRENCY=5
 
-# 健康检查间隔 (毫秒)
+# Health check interval (milliseconds)
 HEALTH_CHECK_INTERVAL=10000
 ```
 
-### 容错机制
+### Fault Tolerance Mechanism
 
-1. **消息持久化**: 所有消息先存入数据库，再进入内存队列
-2. **死信队列**: 永久失败的消息移入死信队列，不丢失
-3. **自动重试**: 可配置重试次数和指数退避
-4. **Nonce 管理**: 自动刷新 nonce，防止交易冲突
-5. **健康检查**: 定期检查系统状态并告警
-6. **优雅关闭**: 等待正在处理的交易完成后关闭
+1. **Message Persistence**: All messages stored in database first, then enter memory queue
+2. **Dead Letter Queue**: Permanently failed messages moved to dead letter queue, no loss
+3. **Automatic Retry**: Configurable retry count and exponential backoff
+4. **Nonce Management**: Auto-refresh nonce to prevent transaction conflicts
+5. **Health Check**: Regularly check system status and alert
+6. **Graceful Shutdown**: Wait for processing transactions to complete before shutdown
 
-## 配置说明
+## Configuration Description
 
-### BSC 测试网配置
+### BSC Testnet Configuration
 
-| 配置项 | 说明 | 默认值 |
+| Config Item | Description | Default Value |
 |--------|------|--------|
-| BSC_RPC_URL | BSC 测试网 RPC URL | https://data-seed-prebsc-1-s1.binance.org:8545/ |
-| BSC_BRIDGE_ADDRESS | BSC 桥合约地址 | - |
-| RELAYER_PRIVATE_KEY | Relayer 私钥 | - |
-| BSC_INJECT_NATIVE_WEI | 注入的 BNB 数量 (wei) | 1 |
+| BSC_RPC_URL | BSC testnet RPC URL | https://data-seed-prebsc-1-s1.binance.org:8545/ |
+| BSC_BRIDGE_ADDRESS | BSC bridge contract address | - |
+| RELAYER_PRIVATE_KEY | Relayer private key | - |
+| BSC_INJECT_NATIVE_WEI | Injected BNB amount (wei) | 1 |
 | BSC_GAS_LIMIT | Gas Limit | 300000 |
-| BSC_GAS_PRICE | Gas Price (留空自动获取) | - |
+| BSC_GAS_PRICE | Gas Price Gas Price (leave empty for auto) | - |
 
-### Solana 配置
+### Solana Configuration
 
-| 配置项 | 说明 | 默认值 |
+| Config Item | Description | Default Value |
 |--------|------|--------|
 | SOLANA_RPC_URL | Solana RPC URL | https://api.devnet.solana.com |
 | SOLANA_PROGRAM_ID | Solana Bridge Program ID | - |
-| SOLANA_POLL_INTERVAL | 轮询间隔 (ms) | 5000 |
+| SOLANA_POLL_INTERVAL | Poll interval (ms) | 5000 |
 
-### 数据库配置
+### Database Configuration
 
-| 配置项 | 说明 | 默认值 |
+| Config Item | Description | Default Value |
 |--------|------|--------|
-| DB_HOST | 数据库主机 | localhost |
-| DB_PORT | 数据库端口 | 5432 |
-| DB_NAME | 数据库名称 | bridge_relayer_bsc |
-| DB_USER | 数据库用户 | postgres |
-| DB_PASSWORD | 数据库密码 | - |
+| DB_HOST | Database host | localhost |
+| DB_PORT | Database port | 5432 |
+| DB_NAME | Database name | bridge_relayer_bsc |
+| DB_USER | Database user | postgres |
+| DB_PASSWORD | Database password | - |
 
-## BSC 测试网信息
+## BSC Testnet Information
 
 - **Chain ID**: 97
 - **RPC URLs**:
@@ -193,21 +193,21 @@ HEALTH_CHECK_INTERVAL=10000
   - https://data-seed-prebsc-2-s1.binance.org:8545/
   - https://bsc-testnet.public.blastapi.io
   - https://bsc-testnet.publicnode.com
-- **区块浏览器**: https://testnet.bscscan.com/
+- **Block Explorer**: https://testnet.bscscan.com/
 
-## 与 Seth 版本的区别
+## Differences from Seth Version
 
-| 特性 | Seth 版本 | BSC 版本 |
+| Feature | Seth Version | BSC Version |
 |------|-----------|----------|
-| 链类型 | 自定义链 | 标准 EVM 链 |
-| 交易格式 | 自定义格式 | 标准 EVM 格式 |
-| 客户端 | sethClient.js | bscClient.js (ethers.js) |
-| 配置文件 | .env | .env.bsc |
-| 数据库 | bridge_relayer | bridge_relayer_bsc |
+| Chain Type | Custom chain | Standard EVM chain |
+| Transaction Format | Custom format | Standard EVM format |
+| Client | sethClient.js | bscClient.js (ethers.js) |
+| Configuration File | .env | .env.bsc |
+| Database | bridge_relayer | bridge_relayer_bsc |
 
-## 代理支持
+## Proxy Support
 
-如果需要通过 HTTP 代理访问 BSC 或 Solana RPC：
+If you need to access BSC or Solana RPC through HTTP proxy:
 
 ```env
 # .env.bsc
@@ -215,9 +215,9 @@ BSC_HTTP_PROXY=http://127.0.0.1:7890
 SOLANA_HTTP_PROXY=http://127.0.0.1:7890
 ```
 
-## 监控和日志
+## Monitoring and Logs
 
-### V1 日志示例
+### V1 Log Example
 
 ```
 [BscRelayer] Initializing...
@@ -227,7 +227,7 @@ SOLANA_HTTP_PROXY=http://127.0.0.1:7890
 [BscRelayer] Started successfully
 ```
 
-### V2 日志示例
+### V2 Log Example
 
 ```
 [RelayerV2] Initializing high-concurrency relayer...
@@ -249,58 +249,58 @@ SOLANA_HTTP_PROXY=http://127.0.0.1:7890
   Avg Process Time: 2100ms
 ```
 
-## 性能调优建议
+## Performance Tuning Suggestions
 
-### 低负载场景 (< 10 TPS)
+### Low Load Scenario (< 10 TPS)
 - `WORKER_COUNT=3`
 - `TX_CONCURRENCY=2`
 - `QUEUE_SIZE=100`
 
-### 中等负载 (10-50 TPS)
+### Medium Load (10-50 TPS)
 - `WORKER_COUNT=5`
 - `TX_CONCURRENCY=3`
 - `QUEUE_SIZE=500`
 
-### 高负载场景 (> 50 TPS)
+### High Load Scenario (> 50 TPS)
 - `WORKER_COUNT=10`
 - `TX_CONCURRENCY=5`
 - `QUEUE_SIZE=1000`
-- 考虑增加数据库连接池大小
+- Consider increasing database connection pool size
 
-## 常见问题
+## FAQ
 
-### 1. 连接 BSC 失败
+### 1. BSC Connection Failed
 
-BSC 测试网 RPC 可能不稳定，系统会自动尝试备用 RPC。如果所有 RPC 都失败，请：
-- 配置代理
-- 稍后重试
-- 使用私有 RPC 节点
+BSC testnet RPC may be unstable. System will automatically try fallback RPCs. If all RPCs fail:
+- Configure proxy
+- Retry later
+- Use private RPC node
 
-### 2. Nonce 冲突
+### 2. Nonce Conflicts
 
-V2 版本已内置 Nonce 管理器，自动处理 nonce 冲突。如果仍有问题：
-- 增加 `TX_CONCURRENCY` 不超过 5
-- 检查是否有其他程序使用同一账户
+V2 version has built-in Nonce Manager to automatically handle nonce conflicts. If issues persist:
+- Keep TX_CONCURRENCY not exceeding 5
+- Check if other programs are using the same account
 
-### 3. 队列堆积
+### 3. Queue Backlog
 
-如果内存队列持续增长：
-- 增加 `WORKER_COUNT`
-- 增加 `TX_CONCURRENCY`
-- 检查 BSC 网络状况
+If memory queue continues to grow：
+- Increase `WORKER_COUNT`
+- Increase `TX_CONCURRENCY`
+- Check BSC network status
 
-### 4. 交易失败
+### 4. Transaction Failed
 
-检查以下项目：
-- 合约地址是否正确
-- Relayer 是否有足够的权限
-- Gas 设置是否合理
-- 余额是否充足
+Check the following:
+- Is contract address correct
+- Does relayer have sufficient permissions
+- Are gas settings reasonable
+- Is balance sufficient
 
-## 安全注意事项
+## Security Considerations
 
-1. **私钥安全**: 不要将私钥提交到代码库
-2. **数据库安全**: 使用强密码保护 PostgreSQL
-3. **网络安全**: 考虑使用防火墙限制数据库访问
-4. **测试网代币**: 只在测试网上使用测试代币
-5. **监控告警**: 设置余额过低告警
+1. **Private Key Security**: Do not commit private keys to code repository
+2. **Database Security**: Use strong password to protect PostgreSQL
+3. **Network Security**: using firewall to restrict database access
+4. **Testnet Tokens**: Only use test tokens on testnet
+5. **Monitoring & Alerts**: Set up low balance alerts

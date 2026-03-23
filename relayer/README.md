@@ -1,55 +1,55 @@
 # Seth-Solana Cross-Chain Bridge Relayer
 
-基于 TrustRelayer 安全模型的 Seth-Solana 跨链桥 Relayer 实现。
+Seth-Solana cross-chain bridge Relayer implementation based on the TrustRelayer security model.
 
-## 重要说明
+## Important Notes
 
-**SETH 是 Seth 链的原生代币（类似 ETH），不是 ERC20 代币。**
+**SETH is the native token of Seth chain (similar to ETH), not an ERC20 token.**
 
-- 池B (PoolB) 使用原生 SETH 进行交易
-- Treasury 合约通过 `msg.value` 接收和发送原生 SETH
-- 用户可以通过 PoolB 买卖原生 SETH
+- Pool B uses native SETH for trading
+- Treasury contract receives and sends native SETH via `msg.value`
+- Users can buy and sell native SETH through Pool B
 
-## 分账流程 (15-50-35)
+## Revenue Split Flow (15-50-35)
 
-**重要：分账逻辑在 Solana 链上完成**
+**Important: Revenue split logic is completed on Solana chain**
 
-当用户在 Solana 链上支付 USDC 时：
+When users pay USDC on Solana chain:
 
 ```
-总金额 (100%)
-    │
-    ├── 15% 推广佣金 (实时分发)
-    │   ├── 10% → L1 推荐人
-    │   └── 5%  → L2 推荐人
-    │
-    ├── 50% 运营储备 (月底清算)
-    │   ├── 5%  → 团队激励钱包
-    │   └── 45% → 项目方多签钱包
-    │
-    └── 35% 生态资金 (跨链到 Seth)
-        └── → Relayer → SethBridge.injectEcosystemFunds() → PoolB
+Total Amount (100%)
+│
+├── 15% Promotion Commission (Real-time Distribution)
+│ ├── 10% → L1 Referrer
+│ └── 5% → L2 Referrer
+│
+├── 50% Operational Reserve (End-of-Month Settlement)
+│ ├── 5% → Team Incentive Wallet
+│ └── 45% → Project Multi-sig Wallet
+│
+└── 35% Ecosystem Fund (Cross-Chain to Seth)
+└── → Relayer → SethBridge.injectEcosystemFunds() → Pool B
 ```
 
-**35% 生态资金直接注入 PoolB：**
-1. Relayer 监听 Solana 的 `RevenueProcessed` 事件
-2. 计算需要的 SETH 数量（基于 PoolB 当前价格）
-3. 调用 `SethBridge.injectEcosystemFunds()` 注入流动性
-4. PoolB 获得 sUSDC + SETH 流动性，支撑 SETH 价格
+**35% Ecosystem Fund directly injected into Pool B:**
+1. Relayer listens to Solana's `RevenueProcessed` event
+2. Calculate required SETH amount (based on Pool B current price)
+3. Call `SethBridge.injectEcosystemFunds()` to inject liquidity
+4. Pool B receives sUSDC + SETH liquidity, supporting SETH price
 
-### Solana 链职责
-- 收入归集
-- 15-50-35 分账计算
-- L1/L2 佣金实时分发
-- 月底清算拨付
-- 触发 35% 跨链
+### Solana Chain Responsibilities
+- Revenue collection
+- 15-50-35 split calculation
+- L1/L2 commission real-time distribution
+- End-of-month settlement disbursement
+- Trigger 35% cross-chain transfer
 
-### Seth 链职责
-- 接收 35% 生态资金
-- 铸造 sUSDC
-- 注入池B支撑 SETH 价格
+### Seth Chain Responsibilities
+- Receive 35% ecosystem fund
+- Mint sUSDC
+- Inject into Pool B to support SETH price
 
-## 架构概览
+## Architecture Overview
 
 ```
 ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
@@ -62,129 +62,129 @@
                          └─────────────────┘
 ```
 
-## 功能特性
+## Features
 
-- **事件监听**: 实时监听 Solana Bridge 程序的 CrossChainLock 事件
-- **消息持久化**: 使用 PostgreSQL 存储跨链消息，支持断点续传
-- **失败重发**: 自动重试失败的消息，支持指数退避策略
-- **状态追踪**: 完整的消息状态管理和操作日志
-- **优雅关闭**: 支持 SIGINT/SIGTERM 信号处理，确保消息不丢失
+- **Event Listening**: Real-time listening to Solana Bridge program's CrossChainLock events
+- **Message Persistence**: PostgreSQL storage for cross-chain messages, supports resume from breakpoint
+- **Automatic Retry**: Automatic retry for failed messages with exponential backoff strategy
+- **State Tracking**: Complete message state management and operation logs
+- **Graceful Shutdown**: SIGINT/SIGTERM signal handling to ensure no message loss
 
-## 目录结构
+## Directory Structure
 
 ```
 relayer/
 ├── db/
-│   ├── init.sql       # 数据库初始化脚本
-│   └── database.js    # 数据库操作类
-├── relayer.js         # Relayer 主程序
-├── package.json       # 项目依赖
-├── .env.example       # 环境变量示例
-└── README.md          # 本文档
+│ ├── init.sql # Database initialization script
+│ └── database.js # Database operation class
+├── relayer.js # Relayer main program
+├── package.json # Project dependencies
+├── .env.example # Environment variable example
+└── README.md # This document
 ```
 
-## 快速开始
+## Quick Start
 
-### 1. 安装依赖
+### 1. Install Dependencies
 
 ```bash
 cd relayer
 npm install
 ```
 
-### 2. 配置环境变量
+### 2. Configure Environment Variables
 
 ```bash
 cp .env.example .env
-# 编辑 .env 文件，填入实际配置
+# Edit .env file with actual configuration
 ```
 
-### 3. 初始化数据库
+### 3. Initialize Database
 
 ```bash
-# 创建数据库
+# Create database
 createdb -U postgres bridge_relayer
 
-# 执行初始化脚本
+# Execute initialization script
 psql -U postgres -d bridge_relayer -f db/init.sql
 ```
 
-### 4. 启动 Relayer
+### 4. Start Relayer
 
 ```bash
-# 生产环境
+# Production environment
 npm start
 
-# 开发环境 (带热重载)
+# Development environment (with hot reload)
 npm run dev
 ```
 
-## 数据库表结构
+## Database Table Structure
 
-### cross_chain_messages (跨链消息表)
+### cross_chain_messages
 
-| 字段 | 类型 | 说明 |
+| Field | Type | Description |
 |------|------|------|
-| id | SERIAL | 主键 |
-| solana_tx_sig | VARCHAR(88) | Solana 交易签名 |
-| solana_tx_sig_bytes32 | VARCHAR(66) | 转换后的 bytes32 格式 |
-| amount | BIGINT | 跨链金额 |
-| recipient_eth | VARCHAR(42) | Seth 接收地址 |
-| sender_solana | VARCHAR(44) | Solana 发送者地址 |
-| status | VARCHAR(20) | 状态: pending/processing/completed/failed |
-| retry_count | INTEGER | 重试次数 |
-| max_retries | INTEGER | 最大重试次数 |
-| last_error | TEXT | 最后错误信息 |
-| seth_tx_hash | VARCHAR(66) | Seth 链交易哈希 |
-| seth_block_number | BIGINT | Seth 链区块号 |
-| created_at | TIMESTAMP | 创建时间 |
-| processed_at | TIMESTAMP | 处理完成时间 |
-| next_retry_at | TIMESTAMP | 下次重试时间 |
+| id | SERIAL | Primary key |
+| solana_tx_sig | VARCHAR(88) | Solana transaction signature |
+| solana_tx_sig_bytes32 | VARCHAR(66) | Converted bytes32 format |
+| amount | BIGINT | Cross-chain amount |
+| recipient_eth | VARCHAR(42) | Seth recipient address |
+| sender_solana | VARCHAR(44) | Solana sender address |
+| status | VARCHAR(20) | Status: pending/processing/completed/failed |
+| retry_count | INTEGER | Retry count |
+| max_retries | INTEGER | Maximum retry count |
+| last_error | TEXT | Last error message |
+| seth_tx_hash | VARCHAR(66) | Seth chain transaction hash |
+| seth_block_number | BIGINT | Seth chain block number |
+| created_at | TIMESTAMP | Creation time |
+| processed_at | TIMESTAMP | Processing completion time |
+| next_retry_at | TIMESTAMP | Next retry time |
 
-### relayer_status (Relayer 状态表)
+### relayer_status Table
 
-| 字段 | 类型 | 说明 |
+| Field | Type | Description |
 |------|------|------|
-| id | SERIAL | 主键 |
-| relayer_address | VARCHAR(42) | Relayer Seth 地址 |
-| last_processed_slot | BIGINT | 最后处理的 Solana slot |
-| last_processed_signature | VARCHAR(88) | 最后处理的交易签名 |
-| is_active | BOOLEAN | 是否活跃 |
-| started_at | TIMESTAMP | 启动时间 |
-| updated_at | TIMESTAMP | 更新时间 |
+| id | SERIAL | Primary key |
+| relayer_address | VARCHAR(42) | Relayer Seth address |
+| last_processed_slot | BIGINT | Last processed Solana slot |
+| last_processed_signature | VARCHAR(88) | Last processed transaction signature |
+| is_active | BOOLEAN | Is active |
+| started_at | TIMESTAMP | Start time |
+| updated_at | TIMESTAMP | Update time |
 
-### operation_logs (操作日志表)
+### operation_logs Table
 
-| 字段 | 类型 | 说明 |
+| Field | Type | Description |
 |------|------|------|
-| id | SERIAL | 主键 |
-| message_id | INTEGER | 关联的消息 ID |
-| operation | VARCHAR(50) | 操作类型 |
-| details | JSONB | 操作详情 |
-| created_at | TIMESTAMP | 创建时间 |
+| id | SERIAL | Primary key |
+| message_id | INTEGER | Related message ID |
+| operation | VARCHAR(50) | Operation type |
+| details | JSONB | Operation details |
+| created_at | TIMESTAMP | Creation time |
 
-## 消息状态流转
+## Message State Flow
 
 ```
                     ┌──────────────┐
                     │   pending    │◀──────────┐
                     └──────┬───────┘           │
                            │                   │
-                    处理失败              重试时间到
+                    Process Failed              Retry Time Reached
                            │                   │
                            ▼                   │
                     ┌──────────────┐           │
                     │  processing  │───────────┘
                     └──────┬───────┘
                            │
-                     处理成功
+                     completed
                            │
                            ▼
                     ┌──────────────┐
                     │   completed  │
                     └──────────────┘
 
-                    超过最大重试次数
+                    Exceed Max Retries
                            │
                            ▼
                     ┌──────────────┐
@@ -192,37 +192,37 @@ npm run dev
                     └──────────────┘
 ```
 
-## 重试策略
+## Retry Strategy
 
-Relayer 使用**指数退避**策略进行失败重试：
+Relayer uses **exponential backoff**strategy for failure retries:
 
-- 第1次重试: 立即
-- 第2次重试: 2分钟后
-- 第3次重试: 4分钟后
-- 第4次重试: 8分钟后
-- 第5次重试: 16分钟后
-- 最大等待时间: 30分钟
+- 1st retry: Immediately
+- 2nd retry: 2 minutes later
+- 3rd retry: 4 minutes later
+- 4th retry: 8 minutes later
+- 5th retry: 16 minutes later
+- Maximum wait time: 30 minutes
 
-## 错误分类
+## Error Classification
 
-### 可重试错误
+### Retryable Errors
 
-- 网络超时
-- 连接错误
-- RPC 限流
-- Gas 价格过高
-- Nonce 问题
+- Network timeout
+- Connection errors
+- RPC rate limiting
+- Gas price too high
+- Nonce issues
 
-### 不可重试错误
+### Non-Retryable Errors
 
-- 交易已处理
-- 无效的接收地址
-- 无效的金额
-- 余额不足
+- Transaction already processed
+- Invalid recipient address
+- Invalid amount
+- Insufficient balance
 
-## 监控和日志
+## Monitoring and Logs
 
-Relayer 每分钟输出统计信息：
+Relayer outputs statistics every minute:
 
 ```
 [Relayer] Stats: {
@@ -237,30 +237,30 @@ Relayer 每分钟输出统计信息：
 }
 ```
 
-## 安全注意事项
+## Security Considerations
 
-1. **私钥保护**: 永远不要将 `RELAYER_PRIVATE_KEY` 提交到代码库
-2. **数据库安全**: 使用强密码保护 PostgreSQL 数据库
-3. **网络隔离**: 建议将 Relayer 部署在私有网络中
-4. **监控告警**: 设置告警监控 Relayer 状态和失败消息
+1. **Private Key Protection**: Never commit RELAYER_PRIVATE_KEY to code repository
+2. **Database Security**: Use strong password to protect PostgreSQL database
+3. **Network Isolation**: Deploy Relayer in private network
+4. **Monitoring & Alerts**: Set up alerts for Relayer status and failed messages
 
-## 生产部署建议
+## Production Deployment Recommendations
 
-### 使用 PM2 管理进程
+### Use PM2 for Process Management
 
 ```bash
-# 安装 PM2
+# Install PM2
 npm install -g pm2
 
-# 启动
+# Start
 pm2 start relayer.js --name bridge-relayer
 
-# 设置开机自启
+# Setup auto-start
 pm2 startup
 pm2 save
 ```
 
-### Docker 部署
+### Docker Deployment
 
 ```dockerfile
 FROM node:18-alpine
@@ -271,34 +271,34 @@ COPY . .
 CMD ["node", "relayer.js"]
 ```
 
-### 环境变量管理
+### Environment Variable Management
 
-推荐使用环境变量管理工具：
+Recommended environment variable management tools:
 - Docker Secrets
 - Kubernetes Secrets
 - AWS Secrets Manager
 - HashiCorp Vault
 
-## 故障恢复
+## Fault Recovery
 
-### 重启后恢复
+### Recovery After Restart
 
-Relayer 重启后会自动：
-1. 检查数据库中的待处理消息
-2. 处理所有 `pending` 状态的消息
-3. 处理需要重试的消息
+After restart, Relayer will automatically:
+1. Check pending messages in database
+2. Process all messages in pending status
+3. Process messages requiring retry
 
-### 数据备份
+### Data Backup
 
-定期备份 PostgreSQL 数据库：
+Regularly backup PostgreSQL database:
 
 ```bash
 pg_dump -U postgres bridge_relayer > backup.sql
 ```
 
-## API 扩展
+## API Extensions
 
-可以通过扩展 Relayer 添加 API 接口：
+Can extend Relayer with API endpoints:
 
 ```javascript
 const express = require('express');

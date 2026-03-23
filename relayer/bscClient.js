@@ -1,8 +1,8 @@
-/**
- * BSC 测试网客户端
- * 使用 ethers.js 与 BSC 测试网交互
+    /**
+ * BSC Testnet Client
+ * Use ethers.js to interact with the BSC Testnet
  * 
- * BSC 测试网信息：
+ * BSC Testnet Information:
  * - Chain ID: 97
  * - RPC: https://data-seed-prebsc-1-s1.binance.org:8545/
  * - Explorer: https://testnet.bscscan.com/
@@ -12,7 +12,7 @@ const { ethers } = require('ethers');
 const createKeccakHash = require('keccak');
 const { Buffer } = require('buffer');
 
-// BSC 测试网配置
+// BSC Testnet Configuration
 const BSC_TESTNET = {
     chainId: 97,
     name: 'BSC Testnet',
@@ -23,7 +23,7 @@ const BSC_TESTNET = {
         'https://data-seed-prebsc-2-s2.binance.org:8545/',
         'https://data-seed-prebsc-1-s3.binance.org:8545/',
         'https://data-seed-prebsc-2-s3.binance.org:8545/',
-        // 备用公共 RPC
+        // Fallback public RPC
         'https://bsc-testnet.public.blastapi.io',
         'https://bsc-testnet.publicnode.com',
         'https://binance-testnet.public.blastapi.io',
@@ -42,9 +42,9 @@ class BscClient {
         this.chainId = BSC_TESTNET.chainId;
         this.proxyUrl = proxyUrl;
         
-        // 创建 provider（支持代理）
+        // Create provider (support proxy)
         if (proxyUrl) {
-            // 使用代理时需要自定义 fetch
+            // Custom fetch required when using proxy
             const { HttpsProxyAgent } = require('https-proxy-agent');
             const agent = new HttpsProxyAgent(proxyUrl);
             
@@ -64,7 +64,7 @@ class BscClient {
             });
         }
         
-        // 创建 wallet（如果提供了私钥）
+        // Create wallet (if private key is provided)
         if (privateKey) {
             this.wallet = new ethers.Wallet(privateKey, this.provider);
             this.relayerAddress = this.wallet.address;
@@ -74,7 +74,7 @@ class BscClient {
     }
 
     /**
-     * 连接到备用 RPC（当前 RPC 不可用时）
+     * Connect to a fallback RPC (when the current RPC is unavailable)
      */
     async connectToFallbackRpc() {
         for (const rpcUrl of BSC_TESTNET.rpcUrls) {
@@ -101,7 +101,7 @@ class BscClient {
                     });
                 }
                 
-                // 测试连接
+                // Test connection
                 await provider.getBlockNumber();
                 
                 this.provider = provider;
@@ -122,7 +122,7 @@ class BscClient {
     }
 
     /**
-     * 获取当前区块号
+     * Get the current block number
      */
     async getBlockNumber() {
         try {
@@ -134,9 +134,9 @@ class BscClient {
     }
 
     /**
-     * 获取账户余额
-     * @param {string} address - 账户地址
-     * @returns {Promise<string>} 余额（wei 字符串）
+     * Get account balance
+     * @param {string} address - Account address
+      * @returns {Promise<string>} Balance (wei string)
      */
     async getBalance(address) {
         try {
@@ -149,9 +149,9 @@ class BscClient {
     }
 
     /**
-     * 获取账户 BNB 余额（可读格式）
-     * @param {string} address - 账户地址
-     * @returns {Promise<string>} 余额（BNB）
+     * Get account BNB balance (human-readable format)
+     * @param {string} address - Account address
+     * @returns {Promise<string>} Balance (BNB)
      */
     async getBalanceInBNB(address) {
         const balance = await this.getBalance(address);
@@ -159,7 +159,7 @@ class BscClient {
     }
 
     /**
-     * 获取当前 Gas 价格
+     * Get current Gas price
      */
     async getGasPrice() {
         try {
@@ -167,13 +167,13 @@ class BscClient {
             return feeData.gasPrice;
         } catch (error) {
             console.error(`[BscClient] Get gas price error: ${error.message}`);
-            return ethers.parseUnits('10', 'gwei'); // 默认 10 Gwei
+            return ethers.parseUnits('10', 'gwei'); // Default gas price 10 Gwei
         }
     }
 
     /**
-     * 获取交易计数（nonce）
-     * @param {string} address - 账户地址
+     * Get transaction count (nonce)
+     * @param {string} address - Account address
      */
     async getNonce(address) {
         try {
@@ -185,8 +185,8 @@ class BscClient {
     }
 
     /**
-     * 获取交易回执
-     * @param {string} txHash - 交易哈希
+     * Get transaction receipt
+     * @param {string} txHash - Transaction hash
      */
     async getTransactionReceipt(txHash) {
         try {
@@ -208,10 +208,10 @@ class BscClient {
     }
 
     /**
-     * 等待交易确认
-     * @param {string} txHash - 交易哈希
-     * @param {number} confirmations - 确认数
-     * @param {number} timeout - 超时时间（毫秒）
+     * Wait for transaction confirmation
+     * @param {string} txHash - Transaction hash
+     * @param {number} confirmations - Number of confirmations
+     * @param {number} timeout - Timeout time (milliseconds)
      */
     async waitForTransaction(txHash, confirmations = 1, timeout = 60000) {
         try {
@@ -224,10 +224,10 @@ class BscClient {
     }
 
     /**
-     * 发送原生代币（BNB）转账
-     * @param {string} to - 接收地址
-     * @param {string|bigint} amount - 金额（wei）
-     * @param {Object} options - 选项
+     * Send native token (BNB) transfer
+     * @param {string} to - Recipient address
+     * @param {string|bigint} amount - Amount (wei)
+     * @param {Object} options - Options
      */
     async sendNativeToken(to, amount, options = {}) {
         if (!this.wallet) {
@@ -263,10 +263,10 @@ class BscClient {
     }
 
     /**
-     * 发送合约调用
-     * @param {string} contractAddress - 合约地址
-     * @param {string} inputData - 调用数据（十六进制）
-     * @param {Object} options - 选项
+     * Send contract call
+     * @param {string} contractAddress - Contract address
+     * @param {string} inputData - Call data (hexadecimal)
+     * @param {Object} options - Options
      */
     async sendContractCall(contractAddress, inputData, options = {}) {
         if (!this.wallet) {
@@ -314,9 +314,9 @@ class BscClient {
     }
 
     /**
-     * 调用合约只读方法
-     * @param {string} contractAddress - 合约地址
-     * @param {string} inputData - 调用数据（十六进制）
+     * Call contract read-only method
+     * @param {string} contractAddress - Contract address
+     * @param {string} inputData - Call data (hexadecimal)
      */
     async callContract(contractAddress, inputData) {
         try {
@@ -361,16 +361,16 @@ class BscClient {
     }
 
     /**
-     * 获取合约实例
-     * @param {string} contractAddress - 合约地址
-     * @param {Array} abi - 合约 ABI
+     * Get contract instance
+     * @param {string} contractAddress - Contract address
+     * @param {Array} abi - Contract ABI
      */
     getContract(contractAddress, abi) {
         return new ethers.Contract(contractAddress, abi, this.wallet || this.provider);
     }
 
     /**
-     * 获取链 ID
+     * Get chain ID
      */
     async getChainId() {
         try {
@@ -382,7 +382,7 @@ class BscClient {
     }
 
     /**
-     * 验证网络连接
+     * Verify network connection
      */
     async verifyConnection() {
         try {
@@ -406,7 +406,7 @@ class BscClient {
     }
 
     /**
-     * 获取链上时间戳
+     * Get block timestamp
      */
     async getBlockTimestamp() {
         try {
@@ -419,17 +419,17 @@ class BscClient {
     }
 
     /**
-     * 等待指定毫秒
+     * Wait for specified milliseconds
      */
     async sleep(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
     /**
-     * 轮询等待交易回执
-     * @param {string} txHash - 交易哈希
-     * @param {number} maxAttempts - 最大尝试次数
-     * @param {number} intervalMs - 间隔时间（毫秒）
+     * Polling wait for transaction receipt
+     * @param {string} txHash - Transaction hash
+     * @param {number} maxAttempts - Maximum attempt times
+     * @param {number} intervalMs - Interval time (milliseconds)
      */
     async waitReceipt(txHash, maxAttempts = 30, intervalMs = 2000) {
         for (let i = 0; i < maxAttempts; i++) {
@@ -443,8 +443,8 @@ class BscClient {
     }
 
     /**
-     * 获取交易详情
-     * @param {string} txHash - 交易哈希
+     * Get transaction details
+     * @param {string} txHash - Transaction hash
      */
     async getTransaction(txHash) {
         try {
@@ -457,8 +457,8 @@ class BscClient {
     }
 
     /**
-     * 估算 Gas
-     * @param {Object} txParams - 交易参数
+     * Estimate Gas for transaction (default value: 300000n gas limit) - BSC Network
+     * @param {Object} txParams - Transaction parameters
      */
     async estimateGas(txParams) {
         try {
@@ -466,7 +466,7 @@ class BscClient {
             return gas;
         } catch (error) {
             console.error(`[BscClient] Estimate gas error: ${error.message}`);
-            return 300000n; // 默认值
+            return 300000n; // Default value
         }
     }
 }

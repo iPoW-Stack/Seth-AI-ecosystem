@@ -1,8 +1,8 @@
 /**
- * Seth 链客户端
- * 基于 https://github.com/iPoW-Stack/SethPub/blob/main/clinode/cli.js
+ * Seth Chain Client
+ * Based on https://github.com/iPoW-Stack/SethPub/blob/main/clinode/cli.js
  * 
- * Seth 链使用自定义交易格式，没有 chainId
+ * Seth chain uses custom transaction format, no chainId
  */
 
 const axios = require('axios');
@@ -23,7 +23,7 @@ function hexToBuffer(hex) {
     return Buffer.from(hex, 'hex');
 }
 
-// Helper: 将 Buffer 正确地 percent-encode，与 Python requests 发送 bytes 的行为一致
+// Helper: Convert Buffer to percent-encoded string, consistent with Python requests sending bytes
 function urlEncodeBytes(buf) {
     let str = '';
     for (const byte of buf) {
@@ -37,12 +37,12 @@ class SethClient {
         this.baseUrl = `http://${host}:${port}`;
         this.txUrl = `${this.baseUrl}/transaction`;
         this.queryUrl = `${this.baseUrl}/query_account`;
-        // 对齐 Seth 官方 cli.py：交易回执使用 /transaction_receipt
+        // Align with Seth official cli.py: transaction receipt uses /transaction_receipt
         this.receiptUrl = `${this.baseUrl}/transaction_receipt`;
-        // 合约查询接口
+        // Contract query interface
         this.queryContractUrl = `${this.baseUrl}/query_contract`;
 
-        // 解析代理（例如 http://127.0.0.1:7890）
+        // Proxy parsing (e.g. http://127.0.0.1:7890)
         if (proxyUrl) {
             try {
                 const u = new URL(proxyUrl);
@@ -65,7 +65,7 @@ class SethClient {
      * Logic: Last 20 bytes of Keccak256(RawPublicKey without '04' prefix)
      */
     deriveAddressFromPubkey(pubKeyBytes) {
-        // 统一转成 Buffer，避免 Uint8Array / 其他类型导致 keccak 报错
+        // Convert to Buffer, avoid Uint8Array / other types causing keccak error
         const buf = Buffer.isBuffer(pubKeyBytes)
             ? pubKeyBytes
             : Buffer.from(pubKeyBytes);
@@ -75,7 +75,7 @@ class SethClient {
     }
 
     /**
-     * 安全解析 query_account 响应（Seth 在地址无效时可能返回纯文本错误而非 JSON）
+     * Securely parse query_account response (Seth may return plain text error instead of JSON when address is invalid)
      */
     _parseQueryAccountResponse(resData) {
         if (resData == null) return null;
@@ -90,10 +90,10 @@ class SethClient {
 
     /**
      * Query account info and get the latest Nonce
-     * 注意：参照 cli.py，地址不带 0x 前缀
+     * Note: Referencing cli.py, address does not start with 0x prefix
      */
     async getLatestNonce(addressHex) {
-        // 移除 0x 前缀（与 cli.py 一致）
+        // Remove 0x prefix (consistent with cli.py)
         if (addressHex.startsWith('0x')) addressHex = addressHex.slice(2);
         
         try {
@@ -166,14 +166,14 @@ class SethClient {
 
     /**
      * Query transaction receipt
-     * 注意: cli.py 直接发送 hex 字符串，不是 bytes
+     * Note: Referencing cli.py, directly send hex string, not bytes
      */
     async getTxReceipt(txHash) {
         try {
-            // 移除 0x 前缀
+            // Remove 0x prefix 
             const cleanHash = txHash.replace(/^0x/, '');
             
-            // 使用 URLSearchParams 构建请求体（与 cli.py 行为一致：直接发送 hex 字符串）
+            // Use URLSearchParams to build request body (consistent with cli.py: directly send hex string)
             const params = new URLSearchParams();
             params.append('tx_hash', cleanHash);
 
@@ -191,11 +191,11 @@ class SethClient {
                 return null;
             }
 
-            // 参考 Seth 官方 cli.py：返回 JSON，包含 status 字段（MessageHandleStatus）
+            // Referencing Seth official cli.py: returns JSON, contains status field (MessageHandleStatus)
             const data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
             const status = typeof data.status === 'number' ? data.status : null;
 
-            // 与 Python 版本一致：kMessageHandle(1)、kTxAccept(3) 视为“处理中”
+            // Consistent with Python version: kMessageHandle(1), kTxAccept(3) treated as "in progress"
             const IN_PROGRESS = new Set([1, 3]);
 
             return {
@@ -394,12 +394,12 @@ class SethClient {
 
     /**
      * Query contract (view/pure functions)
-     * 对应 cli.py 中的 query_contract 接口
+     * Corresponds to cli.py's query_contract interface
      * 
-     * 注意：参照 cli.py，地址不带 0x 前缀
+     * Note: Referencing cli.py, address does not start with 0x prefix
      */
     async queryContract(fromHex, contractAddress, inputData) {
-        // 移除 0x 前缀（与 cli.py 一致）
+        // Remove 0x prefix (consistent with cli.py)
         if (fromHex.startsWith('0x')) fromHex = fromHex.slice(2);
         if (contractAddress.startsWith('0x')) contractAddress = contractAddress.slice(2);
         
@@ -431,7 +431,7 @@ class SethClient {
 
     /**
      * Send contract call (step = 8 for contract execution)
-     * 注意：参照 cli.py，合约调用使用 step=8
+     * Note: Referencing cli.py, contract call uses step=8
      */
     async sendContractCall(privateKeyHex, contractAddress, inputData, options = {}) {
         return this.sendTransaction(privateKeyHex, {
@@ -449,7 +449,7 @@ class SethClient {
      * Encode function call for SethBridge
      */
     encodeBridgeMessage(solanaTxSig, recipient, amount) {
-        // 简单编码：solanaTxSig (64 bytes) + recipient (20 bytes) + amount (32 bytes)
+        // Simple encoding: solanaTxSig (64 bytes) + recipient (20 bytes) + amount (32 bytes)
         const solanaSigBytes = Buffer.alloc(64);
         Buffer.from(solanaTxSig, 'base64').copy(solanaSigBytes);
         
