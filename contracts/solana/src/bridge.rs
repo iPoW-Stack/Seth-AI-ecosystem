@@ -1,4 +1,4 @@
-//! Bridge 模块 - 负责基础跨链桥功能
+//! Bridge Module - Handles basic cross-chain bridge functionality
 
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
@@ -7,20 +7,20 @@ use crate::{Config, VaultAuthority, UserInfo, CrossChainMessage, CrossChainStatu
 use crate::{BridgeError};
 use crate::{ReferrerSet, CrossChainCompleted, RelayerUpdated};
 
-// ==================== 初始化 ====================
+// ==================== Initialization ====================
 
-/// 初始化桥接配置
+/// Initialize bridge configuration
 #[derive(Accounts)]
 pub struct Initialize<'info> {
     #[account(mut)]
     pub owner: Signer<'info>,
     
-    /// 团队钱包
-    /// CHECK: 团队钱包地址
+    /// Team wallet
+    /// CHECK: Team wallet address
     pub team_wallet: AccountInfo<'info>,
     
-    /// 项目方钱包
-    /// CHECK: 项目方钱包地址
+    /// Project wallet
+    /// CHECK: Project wallet address
     pub project_wallet: AccountInfo<'info>,
     
     #[account(
@@ -41,7 +41,7 @@ pub struct Initialize<'info> {
     )]
     pub vault_authority: Account<'info, VaultAuthority>,
     
-    /// Vault USDC 代币账户
+    /// Vault USDC token account
     #[account(
         init,
         payer = owner,
@@ -53,7 +53,7 @@ pub struct Initialize<'info> {
     pub vault_token_account: Account<'info, TokenAccount>,
     
     /// USDC Mint
-    /// CHECK: USDC mint 地址
+    /// CHECK: USDC mint address
     pub usdc_mint: AccountInfo<'info>,
     
     pub system_program: Program<'info, System>,
@@ -61,7 +61,7 @@ pub struct Initialize<'info> {
     pub rent: Sysvar<'info, Rent>,
 }
 
-/// 初始化桥接配置处理逻辑
+/// Initialize bridge configuration handler
 pub fn handle_initialize(ctx: Context<Initialize>, seth_treasury: Pubkey) -> Result<()> {
     let config = &mut ctx.accounts.config;
     config.owner = ctx.accounts.owner.key();
@@ -80,14 +80,68 @@ pub fn handle_initialize(ctx: Context<Initialize>, seth_treasury: Pubkey) -> Res
     Ok(())
 }
 
-// ==================== 推荐系统 ====================
-
-/// 设置推荐关系
+/// Initialize root user (owner) - creates first user without requiring referrer
+/// Only callable by owner during initialization
 #[derive(Accounts)]
+pub struct InitRootUser<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+    
+    #[account(
+        seeds = [b"config"],
+        bump
+    )]
+    pub config: Account<'info, Config>,
+    
+    /// Root user info account
+    #[account(
+        init,
+        payer = owner,
+        space = 8 + UserInfo::INIT_SPACE,
+        seeds = [b"user_info", owner.key().as_ref()],
+        bump
+    )]
+    pub user_info: Account<'info, UserInfo>,
+    
+    pub system_program: Program<'info, System>,
+}
+
+/// Initialize root user handler
+pub fn handle_init_root_user(ctx: Context<InitRootUser>) -> Result<()> {
+    // Verify caller is the owner
+    require!(
+        ctx.accounts.owner.key() == ctx.accounts.config.owner,
+        BridgeError::Unauthorized
+    );
+    
+    let user_info = &mut ctx.accounts.user_info;
+    user_info.user = ctx.accounts.owner.key();
+    user_info.referrer = Pubkey::default(); // Root user has no referrer
+    user_info.is_registered = true;
+    user_info.total_volume = 0;
+    user_info.total_commission_earned = 0;
+    user_info.pending_commission = 0;
+    user_info.created_at = Clock::get()?.unix_timestamp;
+
+    emit!(ReferrerSet {
+        user: ctx.accounts.owner.key(),
+        referrer: Pubkey::default(),
+        timestamp: Clock::get()?.unix_timestamp,
+    });
+
+    Ok(())
+}
+
+// ==================== Referral System ====================
+
+/// Set referrer relationship
+#[derive(Accounts)]
+#[instruction(referrer: Pubkey)]
 pub struct SetReferrer<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
     
+    /// User info account (to be initialized if needed)
     #[account(
         init_if_needed,
         payer = user,
@@ -97,29 +151,57 @@ pub struct SetReferrer<'info> {
     )]
     pub user_info: Account<'info, UserInfo>,
     
+    /// L1 referrer info (must be registered)
+    /// Required: every user must have a referrer
+    #[account(
+        mut,
+        seeds = [b"user_info", referrer.as_ref()],
+        bump,
+        constraint = l1_referrer_info.is_registered @ BridgeError::ReferrerNotRegistered
+    )]
+    pub l1_referrer_info: Account<'info, UserInfo>,
+    
     pub system_program: Program<'info, System>,
+    
+    /// L2 referrer info (referrer's referrer, for L2 commission)
+    /// This is optional - only exists if L1 referrer has a referrer (not root user)
+    /// Seeds not used because L1 might be root user (no L2 referrer)
+    /// Placed last so it can be omitted when L1 is root user
+    /// CHECK: Verified manually in handler if present
+    #[account(mut)]
+    pub l2_referrer_info: Option<AccountInfo<'info>>,
 }
 
-/// 设置推荐关系处理逻辑
+/// Set referrer relationship handler
+/// Validates referrer chain and updates referral statistics
 pub fn handle_set_referrer(ctx: Context<SetReferrer>, referrer: Pubkey) -> Result<()> {
+    // Cannot refer yourself
     require!(
         ctx.accounts.user.key() != referrer,
         BridgeError::CannotReferSelf
     );
-
+    
     let user_info = &mut ctx.accounts.user_info;
     
-    // 如果已有推荐人，不允许修改
+    // If referrer already set, do not allow modification
     require!(
         user_info.referrer == Pubkey::default() || !user_info.is_registered,
         BridgeError::ReferrerAlreadySet
     );
-
+    
+    // Validate referrer is not default (zero address means no referrer)
+    let has_referrer = referrer != Pubkey::default();
+    
+    // Update user info
+    let is_new_user = !user_info.is_registered;
     user_info.user = ctx.accounts.user.key();
     user_info.referrer = referrer;
     user_info.is_registered = true;
-    user_info.created_at = Clock::get()?.unix_timestamp;
-
+    
+    if is_new_user {
+        user_info.created_at = Clock::get()?.unix_timestamp;
+    }
+    
     emit!(ReferrerSet {
         user: ctx.accounts.user.key(),
         referrer,
@@ -129,9 +211,9 @@ pub fn handle_set_referrer(ctx: Context<SetReferrer>, referrer: Pubkey) -> Resul
     Ok(())
 }
 
-// ==================== 跨链消息管理 ====================
+// ==================== Cross-Chain Message Management ====================
 
-/// Relayer 标记跨链完成
+/// Relayer marks cross-chain completed
 #[derive(Accounts)]
 pub struct MarkCrossChainCompleted<'info> {
     pub relayer: Signer<'info>,
@@ -150,7 +232,7 @@ pub struct MarkCrossChainCompleted<'info> {
     pub cross_chain_message: Account<'info, CrossChainMessage>,
 }
 
-/// 标记跨链完成处理逻辑
+/// Mark cross-chain completed handler
 pub fn handle_mark_cross_chain_completed(
     ctx: Context<MarkCrossChainCompleted>,
     seth_tx_hash: [u8; 32],
@@ -182,9 +264,9 @@ pub fn handle_mark_cross_chain_completed(
     Ok(())
 }
 
-// ==================== Relayer 管理 ====================
+// ==================== Relayer Management ====================
 
-/// 设置 Relayer
+/// Set Relayer
 #[derive(Accounts)]
 pub struct SetRelayer<'info> {
     pub owner: Signer<'info>,
@@ -197,7 +279,7 @@ pub struct SetRelayer<'info> {
     pub config: Account<'info, Config>,
 }
 
-/// 设置 Relayer 处理逻辑
+/// Set Relayer handler
 pub fn handle_set_relayer(ctx: Context<SetRelayer>, new_relayer: Pubkey) -> Result<()> {
     require!(
         ctx.accounts.owner.key() == ctx.accounts.config.owner,
@@ -215,9 +297,35 @@ pub fn handle_set_relayer(ctx: Context<SetRelayer>, new_relayer: Pubkey) -> Resu
     Ok(())
 }
 
-// ==================== 辅助函数 ====================
+/// Close user info account (returns rent to user)
+/// Only the account owner can close their account
+#[derive(Accounts)]
+pub struct CloseUserInfo<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+    
+    /// User info account to close
+    #[account(
+        mut,
+        seeds = [b"user_info", user.key().as_ref()],
+        bump,
+        close = user
+    )]
+    pub user_info: Account<'info, UserInfo>,
+}
 
-/// 从 Vault 转账到用户 (使用 AccountInfo 避免生命周期问题)
+/// Close user info handler
+pub fn handle_close_user_info(_ctx: Context<CloseUserInfo>) -> Result<()> {
+    // The close constraint automatically handles:
+    // 1. Transferring lamports to the user
+    // 2. Zeroing out the account data
+    // 3. Marking the account as closed
+    Ok(())
+}
+
+// ==================== Helper Functions ====================
+
+/// Transfer from Vault to user (using AccountInfo to avoid lifetime issues)
 pub fn transfer_from_vault<'info>(
     vault: &AccountInfo<'info>,
     recipient: &AccountInfo<'info>,

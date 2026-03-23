@@ -1,8 +1,8 @@
 /**
- * Seth-Solana 跨链桥 Relayer
+ * Seth-Solana Cross-chain Bridge Relayer
  * 
- * 采用 TrustRelayer 安全模型
- * Seth 链使用自定义交易格式（无 chainId）
+ * Uses TrustRelayer security model
+ * Seth chain uses custom transaction format (no chainId)
  */
 
 require('dotenv').config();
@@ -14,23 +14,29 @@ const { Buffer } = require('buffer');
 const createKeccakHash = require('keccak');
 const secp256k1 = require('secp256k1');
 
-// ==================== 配置 ====================
+// ==================== Configuration ====================
 const CONFIG = {
-    // Solana 配置
+    // Solana Configuration
     solana: {
         rpcUrl: process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com',
         programId: process.env.SOLANA_PROGRAM_ID,
         commitment: 'confirmed',
         pollInterval: parseInt(process.env.SOLANA_POLL_INTERVAL) || 5000,
+        proxy: process.env.SOLANA_HTTP_PROXY || process.env.SOLANA_PROXY || null,
     },
-    // Seth 配置 (使用自定义客户端)
+    // Seth Configuration (using custom client)
     seth: {
         host: process.env.SETH_HOST || '35.184.150.163',
         port: parseInt(process.env.SETH_PORT) || 23001,
         bridgeAddress: process.env.SETH_BRIDGE_ADDRESS,
         privateKey: process.env.RELAYER_PRIVATE_KEY,
+        proxy: process.env.SETH_HTTP_PROXY || process.env.SETH_PROXY || null,
+        // Native SETH amount (wei) to inject to PoolB with ecosystem funds
+        // SethBridge.processCrossChainMessage requires amountSETH > 0 and msg.value >= amountSETH
+        // Default 1 wei is for testing only; configure a reasonable value for production
+        injectNativeWei: process.env.SETH_INJECT_NATIVE_WEI || '1',
     },
-    // 数据库配置
+    // Database Configuration
     database: {
         host: process.env.DB_HOST || 'localhost',
         port: parseInt(process.env.DB_PORT) || 5432,
@@ -39,7 +45,7 @@ const CONFIG = {
         password: process.env.DB_PASSWORD || '',
         maxConnections: parseInt(process.env.DB_MAX_CONNECTIONS) || 10,
     },
-    // Relayer 配置
+    // Relayer Configuration
     relayer: {
         maxRetries: parseInt(process.env.MAX_RETRIES) || 5,
         retryInterval: parseInt(process.env.RETRY_INTERVAL) || 60000,
@@ -47,7 +53,7 @@ const CONFIG = {
     }
 };
 
-// ==================== Relayer 类 ====================
+// ==================== Relayer Class ====================
 class BridgeRelayer {
     constructor() {
         this.db = null;
@@ -67,26 +73,31 @@ class BridgeRelayer {
     }
 
     /**
-     * 初始化 Relayer
+     * Initialize Relayer
      */
     async initialize() {
         console.log('[Relayer] Initializing...');
         
-        // 1. 初始化数据库
+        // 1. Initialize database
         this.db = new Database(CONFIG.database);
         const dbConnected = await this.db.testConnection();
         if (!dbConnected) {
             throw new Error('Failed to connect to database');
         }
 
-        // 2. 初始化 Solana 连接
-        this.solanaConn = new Connection(CONFIG.solana.rpcUrl, CONFIG.solana.commitment);
+        // 2. Initialize Solana connection (with proxy support)
+        const connOptions = { commitment: CONFIG.solana.commitment };
+        if (CONFIG.solana.proxy) {
+            const { HttpsProxyAgent } = require('https-proxy-agent');
+            connOptions.httpsAgent = new HttpsProxyAgent(CONFIG.solana.proxy);
+        }
+        this.solanaConn = new Connection(CONFIG.solana.rpcUrl, connOptions);
         console.log('[Relayer] Solana connection established');
 
-        // 3. 初始化 Seth 客户端
-        this.sethClient = new SethClient(CONFIG.seth.host, CONFIG.seth.port);
+        // 3. Initialize Seth client (with proxy support)
+        this.sethClient = new SethClient(CONFIG.seth.host, CONFIG.seth.port, CONFIG.seth.proxy);
         
-        // 从私钥派生地址
+        // Derive address from private key
         const privateKeyHex = CONFIG.seth.privateKey.startsWith('0x') 
             ? CONFIG.seth.privateKey.slice(2) 
             : CONFIG.seth.privateKey;
@@ -97,11 +108,11 @@ class BridgeRelayer {
         console.log(`[Relayer] Seth client initialized`);
         console.log(`[Relayer] Relayer address: ${this.relayerAddress}`);
 
-        // 4. 验证 Relayer 余额
+        // 4. Verify Relayer balance
         const balance = await this.sethClient.getBalance(this.relayerAddress);
         console.log(`[Relayer] Relayer balance: ${balance}`);
 
-        // 5. 更新数据库中的 Relayer 状态
+        // 5. Update Relayer status in database
         await this.db.updateRelayerStatus({
             relayerAddress: this.relayerAddress
         });
@@ -110,7 +121,7 @@ class BridgeRelayer {
     }
 
     /**
-     * 启动 Relayer
+     * Start Relayer
      */
     async start() {
         if (this.isRunning) {
@@ -126,23 +137,23 @@ class BridgeRelayer {
 
         await this.db.setRelayerActive(true);
 
-        // 启动 Solana 事件监听
+        // Start Solana event listener
         this.startSolanaListener();
 
-        // 启动重试调度器
+        // Start retry scheduler
         this.startRetryScheduler();
 
-        // 启动统计报告
+        // Start stats reporter
         this.startStatsReporter();
 
-        // 处理启动时可能遗留的待处理消息
+        // Process pending messages on startup
         await this.processPendingMessages();
 
         console.log('[Relayer] Started successfully');
     }
 
     /**
-     * 停止 Relayer
+     * Stop Relayer
      */
     async stop() {
         if (!this.isRunning) return;
@@ -165,7 +176,7 @@ class BridgeRelayer {
     }
 
     /**
-     * 优雅关闭
+     * Graceful shutdown
      */
     async shutdown() {
         console.log('[Relayer] Initiating graceful shutdown...');
@@ -174,15 +185,15 @@ class BridgeRelayer {
         console.log('[Relayer] Shutdown complete');
     }
 
-    // ==================== Solana 监听 ====================
+    // ==================== Solana Listener ====================
 
     /**
-     * 启动 Solana 事件监听
+     * Start Solana event listener
      */
     startSolanaListener() {
         const programId = new PublicKey(CONFIG.solana.programId);
         
-        // 使用 onLogs 监听程序日志
+        // Use onLogs to listen for program logs
         this.solanaConn.onLogs(
             programId,
             async (logs, ctx) => {
@@ -192,7 +203,7 @@ class BridgeRelayer {
             CONFIG.solana.commitment
         );
 
-        // 同时使用轮询作为备份机制
+        // Also use polling as backup mechanism
         this.pollTimer = setInterval(async () => {
             if (this.isShuttingDown) return;
             await this.pollSolanaTransactions();
@@ -202,7 +213,7 @@ class BridgeRelayer {
     }
 
     /**
-     * 处理 Solana 日志
+     * Handle Solana logs
      */
     async handleSolanaLogs(logs, ctx) {
         try {
@@ -242,7 +253,7 @@ class BridgeRelayer {
     }
 
     /**
-     * 轮询 Solana 交易（备份机制）
+     * Poll Solana transactions (backup mechanism)
      */
     async pollSolanaTransactions() {
         try {
@@ -281,7 +292,7 @@ class BridgeRelayer {
     }
 
     /**
-     * 解析 Solana 交易
+     * Parse Solana transaction
      */
     async parseSolanaTransaction(txSignature) {
         try {
@@ -293,6 +304,7 @@ class BridgeRelayer {
             if (!txDetails || !txDetails.meta) return null;
 
             let amount = null;
+            let teamFunds = null;
             let recipientEth = null;
             let senderSolana = null;
 
@@ -305,6 +317,7 @@ class BridgeRelayer {
                             const eventData = this.parseAnchorEvent(base64Data);
                             if (eventData) {
                                 amount = eventData.amount || amount;
+                                teamFunds = eventData.teamFunds || teamFunds;
                                 recipientEth = eventData.recipientEth || recipientEth;
                                 senderSolana = eventData.sender || senderSolana;
                             }
@@ -340,7 +353,7 @@ class BridgeRelayer {
                 return null;
             }
 
-            // 转换 Solana 签名为 bytes32
+            // Convert Solana signature to bytes32
             const sigBytes = bs58.decode(txSignature);
             const solanaTxSigBytes32 = '0x' + createKeccakHash('keccak256')
                 .update(Buffer.concat([Buffer.alloc(32), sigBytes.slice(0, 32)]))
@@ -350,6 +363,7 @@ class BridgeRelayer {
                 solanaTxSig: txSignature,
                 solanaTxSigBytes32,
                 amount: amount.toString(),
+                teamFunds: teamFunds ? teamFunds.toString() : '0',
                 recipientEth,
                 senderSolana: senderSolana || 'unknown',
                 solanaBlockTime: txDetails.blockTime
@@ -362,31 +376,108 @@ class BridgeRelayer {
     }
 
     /**
-     * 解析 Anchor 事件数据
+     * Parse Anchor event data (RevenueProcessed event)
+     * 
+     * RevenueProcessed event structure:
+     * - 8 bytes: event discriminator
+     * - 32 bytes: user (Pubkey)
+     * - 8 bytes: amount (u64) - original amount
+     * - 8 bytes: commission_l1 (u64)
+     * - 8 bytes: commission_l2 (u64)
+     * - 8 bytes: team_funds (u64) - 5% team funds
+     * - 8 bytes: project_funds (u64)
+     * - 8 bytes: ecosystem_funds (u64) - 30% ecosystem funds
+     * - 1 byte: has_l1_referrer (bool)
+     * - 32 bytes: l1_referrer (Option<Pubkey>)
+     * - 1 byte: has_l2_referrer (bool)
+     * - 32 bytes: l2_referrer (Option<Pubkey>)
+     * - 1 byte: product_type (u8)
+     * - 8 bytes: timestamp (i64)
      */
     parseAnchorEvent(base64Data) {
         try {
             const buffer = Buffer.from(base64Data, 'base64');
             if (buffer.length < 8) return null;
 
-            let offset = 8;
-            if (buffer.length >= offset + 8 + 20) {
-                const amount = buffer.readBigUInt64LE(offset);
-                offset += 8;
-                
-                const recipientEthBytes = buffer.slice(offset, offset + 20);
-                const recipientEth = '0x' + recipientEthBytes.toString('hex');
-                
-                return { amount: amount.toString(), recipientEth };
+            let offset = 8; // Skip discriminator
+            
+            // Read user (32 bytes)
+            if (buffer.length < offset + 32) return null;
+            offset += 32;
+            
+            // Read amount (8 bytes)
+            if (buffer.length < offset + 8) return null;
+            const amount = buffer.readBigUInt64LE(offset);
+            offset += 8;
+            
+            // Read commission_l1 (8 bytes)
+            if (buffer.length < offset + 8) return null;
+            offset += 8;
+            
+            // Read commission_l2 (8 bytes)
+            if (buffer.length < offset + 8) return null;
+            offset += 8;
+            
+            // Read team_funds (8 bytes) - 5% team funds
+            let teamFunds = BigInt(0);
+            if (buffer.length >= offset + 8) {
+                teamFunds = buffer.readBigUInt64LE(offset);
             }
-            return null;
+            offset += 8;
+            
+            // Read project_funds (8 bytes)
+            if (buffer.length < offset + 8) return null;
+            offset += 8;
+            
+            // Read ecosystem_funds (8 bytes) - 30% ecosystem funds
+            let ecosystemFunds = amount;
+            if (buffer.length >= offset + 8) {
+                ecosystemFunds = buffer.readBigUInt64LE(offset);
+            }
+            offset += 8;
+            
+            // Read l1_referrer (Option<Pubkey>)
+            if (buffer.length < offset + 1) return null;
+            const hasL1Referrer = buffer.readUInt8(offset) === 1;
+            offset += 1;
+            if (hasL1Referrer && buffer.length >= offset + 32) {
+                offset += 32;
+            }
+            
+            // Read l2_referrer (Option<Pubkey>)
+            if (buffer.length < offset + 1) return null;
+            const hasL2Referrer = buffer.readUInt8(offset) === 1;
+            offset += 1;
+            if (hasL2Referrer && buffer.length >= offset + 32) {
+                offset += 32;
+            }
+            
+            // Read product_type (1 byte)
+            if (buffer.length < offset + 1) return null;
+            const productType = buffer.readUInt8(offset);
+            offset += 1;
+            
+            // Read recipient (20 bytes) - if present
+            let recipientEth = null;
+            if (buffer.length >= offset + 20) {
+                const recipientEthBytes = buffer.slice(offset, offset + 20);
+                recipientEth = '0x' + recipientEthBytes.toString('hex');
+            }
+            
+            return { 
+                amount: ecosystemFunds.toString(), // 30% ecosystem funds
+                teamFunds: teamFunds.toString(),   // 5% team funds
+                originalAmount: amount.toString(),
+                recipientEth,
+                productType
+            };
         } catch (error) {
             return null;
         }
     }
 
     /**
-     * 从指令数据中解析
+     * Parse instruction data
      */
     parseInstructionData(txDetails) {
         try {
@@ -414,10 +505,10 @@ class BridgeRelayer {
         }
     }
 
-    // ==================== 消息处理 ====================
+    // ==================== Message Processing ====================
 
     /**
-     * 处理待处理消息
+     * Process pending messages
      */
     async processPendingMessages() {
         try {
@@ -434,34 +525,68 @@ class BridgeRelayer {
     }
 
     /**
-     * 处理单条消息 - 调用 Seth 链桥合约
+     * Process single message - call Seth bridge contract
+     * 
+     * Distribution scheme (10-5-5-50-30):
+     * - L1 Commission (10%) -> Solana real-time transfer to referrer
+     * - L2 Commission (5%)  -> Solana real-time transfer to L2 referrer
+     * - Project Reserve (50%) -> Solana real-time transfer to Gnosis Safe
+     * - Cross-chain Ecosystem (30%) -> Cross-chain to PoolB (amount field)
+     * - Team Incentive (5%)  -> Cross-chain to TeamPayroll (team_funds field)
      */
     async processMessage(message) {
-        const { id, solana_tx_sig, solana_tx_sig_bytes32, amount, recipient_eth } = message;
+        const { id, solana_tx_sig, solana_tx_sig_bytes32, amount, recipient_eth, team_funds } = message;
 
         try {
             await this.db.markAsProcessing(id);
             await this.db.logOperation(id, 'process', { attempt: message.retry_count + 1 });
 
             console.log(`[Relayer] Processing message ${id}: ${solana_tx_sig}`);
-            console.log(`[Relayer]   Amount: ${amount}`);
+            console.log(`[Relayer]   Ecosystem Amount (30%): ${amount}`);
+            console.log(`[Relayer]   Team Funds (5%): ${team_funds || 0}`);
             console.log(`[Relayer]   Recipient: ${recipient_eth}`);
 
-            // 编码合约调用数据
-            // function: markCrossChainCompleted(bytes32 solanaTxSig, address recipient, uint256 amount)
-            const inputData = this.encodeMarkCompleted(solana_tx_sig_bytes32, recipient_eth, amount);
+            // Cross-chain fund processing:
+            // SethBridge.processCrossChainMessage(bytes32 solanaTxSig, uint256 ecosystemAmount, uint256 teamFundsAmount, uint256 amountSETH)
+            // - ecosystemAmount: 30% ecosystem funds -> inject to PoolB
+            // - teamFundsAmount: 5% team funds -> to TeamPayroll (auto-swap to SETH via PoolB)
+            // - amountSETH: native SETH (for PoolB liquidity pairing)
+            const ecosystemAmount = BigInt(amount || 0);
+            const teamFundsAmount = BigInt(team_funds || 0);
+            const amountSETH = BigInt(CONFIG.seth.injectNativeWei);
+            
+            const inputData = this.encodeProcessCrossChainMessage(
+                solana_tx_sig_bytes32, 
+                ecosystemAmount, 
+                teamFundsAmount, 
+                amountSETH
+            );
+            const selector = inputData.slice(0, 8);
+            console.log(`[Relayer] Seth call: processCrossChainMessage selector=0x${selector}`);
+            console.log(`[Relayer]   ecosystemAmount=${ecosystemAmount.toString()} teamFundsAmount=${teamFundsAmount.toString()} msg.value=${amountSETH.toString()}`);
 
-            // 使用 SethClient 发送交易
+            // Send transaction using SethClient
             const result = await this.sethClient.sendContractCall(
                 CONFIG.seth.privateKey,
                 CONFIG.seth.bridgeAddress.replace('0x', ''),
                 inputData,
-                { gasLimit: 200000, gasPrice: 1 }
+                { gasLimit: 200000, gasPrice: 1, amount: amountSETH.toString() }
             );
 
             if (result.success) {
                 console.log(`[Relayer] Seth tx sent: ${result.txHash}`);
                 console.log(`[Relayer] Response: ${JSON.stringify(result.response)}`);
+                if (result.request) {
+                    console.log(`[Relayer] Seth request: ${JSON.stringify(result.request)}`);
+                }
+
+                // Success doesn't mean on-chain: poll transaction_receipt for confirmation
+                const receipt = await this.waitSethReceipt(result.txHash, 8, 1000);
+                console.log(`[Relayer] Seth receipt: ${receipt ? JSON.stringify(receipt) : '(null)'}`);
+                if (receipt?.status === 10) {
+                    // kNotExists: transaction not found on node, treat as dropped, retry
+                    throw new Error(`Seth tx not exists (status=10): ${result.txHash}`);
+                }
                 
                 await this.db.markAsCompleted(id, {
                     txHash: result.txHash,
@@ -469,7 +594,8 @@ class BridgeRelayer {
                 });
 
                 this.stats.totalProcessed++;
-                this.stats.totalRevenueProcessed += parseFloat(amount) / 1e18;
+                // ecosystemAmount is 6 decimals (USDC), rough statistics only
+                this.stats.totalRevenueProcessed += Number(ecosystemAmount) / 1e6;
                 this.stats.lastProcessedAt = new Date();
                 
                 console.log(`[Relayer] Successfully processed message ${id}`);
@@ -494,24 +620,53 @@ class BridgeRelayer {
         }
     }
 
-    /**
-     * 编码 markCrossChainCompleted 函数调用
-     * function markCrossChainCompleted(bytes32 solanaTxSig, address recipient, uint256 amount)
-     */
-    encodeMarkCompleted(solanaTxSig, recipient, amount) {
-        // 移除 0x 前缀
-        const sig = solanaTxSig.replace('0x', '');
-        const addr = recipient.replace('0x', '').padStart(40, '0');
-        const amt = BigInt(amount).toString(16).padStart(64, '0');
-        
-        // 函数选择器: keccak256("markCrossChainCompleted(bytes32,address,uint256)")[:4]
-        const selector = 'a8b3f1c7'; // 需要根据实际合约计算
-        
-        return selector + sig + addr + amt;
+    async sleep(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
     /**
-     * 判断错误是否可重试
+     * Poll Seth tx receipt
+     * @param {string} txHash
+     * @param {number} maxAttempts
+     * @param {number} intervalMs
+     */
+    async waitSethReceipt(txHash, maxAttempts = 8, intervalMs = 1000) {
+        for (let i = 0; i < maxAttempts; i++) {
+            const r = await this.sethClient.getTxReceipt(txHash);
+            if (r) {
+                // done=true means terminal state; status=10 means not exists, return immediately for error handling
+                if (r.done || r.status === 10) return r;
+            }
+            await this.sleep(intervalMs);
+        }
+        return null;
+    }
+
+    /**
+     * Encode processCrossChainMessage function call
+     * function processCrossChainMessage(bytes32 solanaTxSig, uint256 ecosystemAmount, uint256 teamFundsAmount, uint256 amountSETH)
+     * @param solanaTxSigBytes32 Solana transaction signature (bytes32)
+     * @param ecosystemAmount Ecosystem funds (30%) - inject to PoolB
+     * @param teamFundsAmount Team funds (5%) - to TeamPayroll
+     * @param amountSETH Native SETH amount (for PoolB liquidity)
+     */
+    encodeProcessCrossChainMessage(solanaTxSigBytes32, ecosystemAmount, teamFundsAmount, amountSETH) {
+        const sig = solanaTxSigBytes32.replace(/^0x/, '').padStart(64, '0');
+        const ecoAmt = BigInt(ecosystemAmount).toString(16).padStart(64, '0');
+        const teamAmt = BigInt(teamFundsAmount).toString(16).padStart(64, '0');
+        const amtSETH = BigInt(amountSETH).toString(16).padStart(64, '0');
+
+        // selector = keccak256("processCrossChainMessage(bytes32,uint256,uint256,uint256)")[:4]
+        const selector = createKeccakHash('keccak256')
+            .update('processCrossChainMessage(bytes32,uint256,uint256,uint256)')
+            .digest('hex')
+            .slice(0, 8);
+
+        return selector + sig + ecoAmt + teamAmt + amtSETH;
+    }
+
+    /**
+     * Determine if error is retryable
      */
     isRetryableError(error) {
         const errorMessage = error.message?.toLowerCase() || '';
@@ -541,10 +696,10 @@ class BridgeRelayer {
         return true;
     }
 
-    // ==================== 重试调度器 ====================
+    // ==================== Retry Scheduler ====================
 
     /**
-     * 启动重试调度器
+     * Start retry scheduler
      */
     startRetryScheduler() {
         this.retryTimer = setInterval(async () => {
@@ -556,7 +711,7 @@ class BridgeRelayer {
     }
 
     /**
-     * 处理待重试的消息
+     * Process pending retry messages
      */
     async processRetries() {
         try {
@@ -578,10 +733,10 @@ class BridgeRelayer {
         }
     }
 
-    // ==================== 统计报告 ====================
+    // ==================== Stats Reporter ====================
 
     /**
-     * 启动统计报告
+     * Start stats reporter
      */
     startStatsReporter() {
         setInterval(async () => {
@@ -602,7 +757,7 @@ class BridgeRelayer {
     }
 }
 
-// ==================== 主程序入口 ====================
+// ==================== Main Entry ====================
 
 async function main() {
     const relayer = new BridgeRelayer();

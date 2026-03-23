@@ -1,97 +1,97 @@
-//! 状态数据结构模块
+//! State Data Structure Module
 
 use anchor_lang::prelude::*;
 
-// ==================== 全局配置 ====================
+// ==================== Global Configuration ====================
 
-/// 全局配置账户
+/// Global configuration account
 #[account]
 #[derive(InitSpace)]
 pub struct Config {
-    /// 管理员
+    /// Administrator
     pub owner: Pubkey,
     
-    /// Seth链Treasury地址
+    /// Seth chain Treasury address
     pub seth_treasury: Pubkey,
     
-    /// 团队钱包 (5%)
+    /// Team wallet (5%)
     pub team_wallet: Pubkey,
     
-    /// 项目方钱包 (45%)
+    /// Project wallet (45%)
     pub project_wallet: Pubkey,
     
-    /// Vault PDA授权
+    /// Vault PDA authority
     pub vault_authority: Pubkey,
     
-    /// 受信任的Relayer
+    /// Trusted Relayer
     pub relayer: Pubkey,
     
     /// PDA bump
     pub bump: u8,
     
-    // ===== 统计 =====
+    // ===== Statistics =====
     
-    /// 总收入
+    /// Total revenue
     pub total_revenue: u64,
     
-    /// 总分发佣金
+    /// Total commission distributed
     pub total_commission_distributed: u64,
     
-    /// 总跨链生态资金
+    /// Total cross-chain ecosystem funds
     pub total_ecosystem_transferred: u64,
     
-    // ===== 待清算资金 =====
+    // ===== Pending Settlement Funds =====
     
-    /// 待拨付团队激励
+    /// Pending team incentive
     pub pending_team_funds: u64,
     
-    /// 待拨付项目方储备
+    /// Pending project reserve
     pub pending_project_funds: u64,
     
-    /// 上次清算时间
+    /// Last settlement timestamp
     pub last_settlement_timestamp: i64,
 }
 
 // ==================== Vault ====================
 
-/// Vault 授权账户
+/// Vault authority account
 #[account]
 #[derive(InitSpace)]
 pub struct VaultAuthority {
     pub bump: u8,
 }
 
-// ==================== 用户相关 ====================
+// ==================== User Related ====================
 
-/// 用户信息账户
+/// User info account (105 bytes - matching existing on-chain data)
 #[account]
 #[derive(InitSpace)]
 pub struct UserInfo {
-    /// 用户地址
+    /// User address
     pub user: Pubkey,
     
-    /// L1 推荐人
+    /// L1 referrer (direct referrer)
     pub referrer: Pubkey,
     
-    /// 是否已注册
+    /// Is registered
     pub is_registered: bool,
     
-    /// 总交易量
+    /// Total transaction volume
     pub total_volume: u64,
     
-    /// 累计获得的佣金
+    /// Total commission earned
     pub total_commission_earned: u64,
     
-    /// 待提取佣金
+    /// Pending commission to withdraw
     pub pending_commission: u64,
     
-    /// 注册时间
+    /// Registration timestamp
     pub created_at: i64,
 }
 
-// ==================== 跨链消息 ====================
+// ==================== Cross-Chain Message ====================
 
-/// 跨链消息状态
+/// Cross-chain message status
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
 pub enum CrossChainStatus {
     Pending,
@@ -99,54 +99,54 @@ pub enum CrossChainStatus {
     Failed,
 }
 
-/// 跨链消息账户
+/// Cross-chain message account
 #[account]
 #[derive(InitSpace)]
 pub struct CrossChainMessage {
-    /// 发送者
+    /// Sender
     pub sender: Pubkey,
     
-    /// 原始金额
+    /// Original amount
     pub original_amount: u64,
     
-    /// 跨链金额 (35%)
+    /// Cross-chain amount (ecosystem funds 30%)
     pub amount: u64,
     
-    /// Seth链接收地址
-    pub seth_recipient: [u8; 20],
-    
-    // ===== 分账详情 =====
-    
-    /// L1佣金
-    pub commission_l1: u64,
-    
-    /// L2佣金
-    pub commission_l2: u64,
-    
-    /// 团队资金
+    /// Team funds (5%) - for cross-chain to TeamPayroll
     pub team_funds: u64,
     
-    /// 项目方资金
+    /// Seth chain recipient address
+    pub seth_recipient: [u8; 20],
+    
+    // ===== Distribution Details =====
+    
+    /// L1 commission
+    pub commission_l1: u64,
+    
+    /// L2 commission
+    pub commission_l2: u64,
+    
+    /// Project funds (50%) - already distributed locally
     pub project_funds: u64,
     
-    /// 产品类型
+    /// Product type
     pub product_type: u8,
     
-    /// L1 推荐人
+    /// L1 referrer
     pub l1_referrer: Option<Pubkey>,
     
-    /// L2 推荐人
+    /// L2 referrer
     pub l2_referrer: Option<Pubkey>,
     
-    /// 状态
+    /// Status
     pub status: CrossChainStatus,
     
-    /// Seth链交易哈希
+    /// Seth chain transaction hash
     pub seth_tx_hash: [u8; 32],
     
-    /// 创建时间
+    /// Created timestamp
     pub created_at: i64,
     
-    /// 处理时间
+    /// Processed timestamp
     pub processed_at: i64,
 }

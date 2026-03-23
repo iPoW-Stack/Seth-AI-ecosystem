@@ -11,7 +11,7 @@ mod tests;
 
 use instructions::*;
 
-declare_id!("7yxEZzWfZxJuhRLJUQwjSioiJ49NMDa1bw2JyBFwYcE7");
+declare_id!("2haVXZEwiHE68i3hNuCi2eq9yVKUoXumdUFPJohWd8LV");
 
 #[program]
 pub mod dirm_program {

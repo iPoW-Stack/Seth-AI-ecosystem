@@ -3,12 +3,12 @@ pragma solidity ^0.8.20;
 
 /**
  * @title sUSDC - Seth Chain USDC
- * @notice 跨链映射的 USDC 代币，支持 mint/burn
- * @dev Ownable 功能已内联，不依赖外部库
- *      包含 DIRM 曲线交易功能
+ * @notice Cross-chain mapped USDC token with mint/burn support
+ * @dev Ownable functionality inlined, no external dependencies
+ *      Includes DIRM curve trading functionality
  */
 contract sUSDC {
-    // ==================== Ownable 功能（内联） ====================
+    // ==================== Ownable Functionality (Inlined) ====================
     
     address private _owner;
 
@@ -34,7 +34,7 @@ contract sUSDC {
         _owner = newOwner;
     }
 
-    // ==================== ERC20 基础功能 ====================
+    // ==================== ERC20 Basic Functionality ====================
     
     string public constant name = "Seth USDC";
     string public constant symbol = "sUSDC";
@@ -51,7 +51,7 @@ contract sUSDC {
     event MinterAdded(address indexed minter);
     event MinterRemoved(address indexed minter);
 
-    // ==================== Mint 权限管理 ====================
+    // ==================== Mint Permission Management ====================
     
     mapping(address => bool) public minters;
     
@@ -70,14 +70,14 @@ contract sUSDC {
         emit MinterRemoved(_minter);
     }
 
-    // ==================== 构造函数 ====================
+    // ==================== Constructor ====================
 
     constructor() {
         _owner = msg.sender;
         emit OwnershipTransferred(address(0), msg.sender);
     }
 
-    // ==================== ERC20 核心功能 ====================
+    // ==================== ERC20 Core Functions ====================
 
     function transfer(address to, uint256 amount) external returns (bool) {
         require(to != address(0), "sUSDC: Transfer to zero address");
@@ -110,7 +110,7 @@ contract sUSDC {
         return true;
     }
 
-    // ==================== Mint/Burn (仅限 Minter) ====================
+    // ==================== Mint/Burn (Minter Only) ====================
 
     function mint(address to, uint256 amount) external onlyMinter {
         require(to != address(0), "sUSDC: Mint to zero address");
@@ -133,7 +133,7 @@ contract sUSDC {
         emit Transfer(from, address(0), amount);
     }
 
-    // ==================== DIRM 曲线交易参数 ====================
+    // ==================== DIRM Curve Trading Parameters ====================
     
     // Curve Parameters
     uint256 public constant A = 100;
@@ -144,24 +144,24 @@ contract sUSDC {
     int256 public constant R_MAX = 5e16;     // 0.05
     int256 public constant TARGET_P = 1e18;  // 1.00
 
-    // State Variables (内部账本)
-    uint256 public reserveX;  // USDC 储备
-    uint256 public reserveY;  // sUSDC 储备
-    uint256 public treasuryX; // 国库 X
-    uint256 public treasuryY; // 国库 Y
+    // State Variables (internal ledger)
+    uint256 public reserveX;  // USDC reserve
+    uint256 public reserveY;  // sUSDC reserve
+    uint256 public treasuryX; // Treasury X
+    uint256 public treasuryY; // Treasury Y
     
-    // 内部账本（用于 DIRM 交易）
-    mapping(address => uint256) public balanceOfX; // 虚拟 USDC 余额
-    mapping(address => uint256) public balanceOfY; // 虚拟 sUSDC 余额
+    // Internal ledger (for DIRM trading)
+    mapping(address => uint256) public balanceOfX; // Virtual USDC balance
+    mapping(address => uint256) public balanceOfY; // Virtual sUSDC balance
 
-    // ==================== 水龙头（测试用） ====================
+    // ==================== Faucet (For Testing) ====================
 
     function faucet(uint256 amountX, uint256 amountY) external {
         balanceOfX[msg.sender] += amountX;
         balanceOfY[msg.sender] += amountY;
     }
 
-    // ==================== 初始化资金池 ====================
+    // ==================== Initialize Pool ====================
 
     function initializePool(uint256 initX, uint256 initY) external {
         require(reserveX == 0 && reserveY == 0, "Pool already initialized");
@@ -174,7 +174,7 @@ contract sUSDC {
         reserveY = initY;
     }
 
-    // ==================== 定点数学辅助函数 ====================
+    // ==================== Fixed-Point Math Helper Functions ====================
 
     function mulWad(int256 a, int256 b) internal pure returns (int256) {
         return (a * b) / 1e18;
@@ -184,7 +184,7 @@ contract sUSDC {
         return (a * 1e18) / b;
     }
 
-    // Padé 近似 tanh(x)
+    // Padé approximation tanh(x)
     function tanh(int256 x) internal pure returns (int256) {
         if (x == 0) return 0;
         bool isNegative = x < 0;
@@ -274,7 +274,7 @@ contract sUSDC {
         return mulWad(R_MAX, t);
     }
 
-    // ==================== 交易接口 ====================
+    // ==================== Trading Interface ====================
 
     function swapUSDCForSUSDC(uint256 dx) external returns (uint256 dy_actual) {
         require(dx > 0, "Zero amount");

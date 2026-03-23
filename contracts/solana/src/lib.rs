@@ -21,7 +21,7 @@ pub use bridge::*;
 pub use revenue::*;
 
 // Program ID (replace when deploying)
-declare_id!("5V3anofFhgpB9D8Uc72JDHg1VVH8qxJJrtaEMMxS4kmw");
+declare_id!("125eQs1s3SNxd5KFRpAJ6JvtVpD4tRYw6fWKomibQ8tc");
 
 #[program]
 pub mod seth_bridge {
@@ -32,6 +32,11 @@ pub mod seth_bridge {
     /// Initialize bridge configuration
     pub fn initialize(ctx: Context<Initialize>, seth_treasury: Pubkey) -> Result<()> {
         handle_initialize(ctx, seth_treasury)
+    }
+
+    /// Initialize root user (owner) - creates first user without requiring referrer
+    pub fn init_root_user(ctx: Context<InitRootUser>) -> Result<()> {
+        handle_init_root_user(ctx)
     }
 
     /// Set referrer relationship
@@ -52,6 +57,11 @@ pub mod seth_bridge {
         handle_set_relayer(ctx, new_relayer)
     }
 
+    /// Close user info account (returns rent to user)
+    pub fn close_user_info(ctx: Context<CloseUserInfo>) -> Result<()> {
+        handle_close_user_info(ctx)
+    }
+
     // ==================== Revenue Instructions ====================
 
     /// Process revenue and execute 15-50-35 distribution
@@ -62,6 +72,14 @@ pub mod seth_bridge {
         seth_recipient: [u8; 20],
     ) -> Result<()> {
         handle_process_revenue(ctx, amount, product_type, seth_recipient)
+    }
+
+    /// Distribute commission to referrer
+    pub fn distribute_commission(
+        ctx: Context<DistributeCommission>,
+        amount: u64,
+    ) -> Result<()> {
+        handle_distribute_commission(ctx, amount)
     }
 
     /// User withdraws commission

@@ -1,12 +1,17 @@
 [provider]
-cluster = "devnet"
+cluster = "https://devnet.helius-rpc.com/?api-key=453899d1-2296-4503-b3df-fcc3c64436bc"
 wallet = "./deployer-keypair.json"
 
+[workspace]
+members = [".", "dirm"]
+
 [programs.localnet]
-seth_bridge = "5V3anofFhgpB9D8Uc72JDHg1VVH8qxJJrtaEMMxS4kmw"
+seth_bridge = "2PpwtfR2QHfR7qGhH8eaeiTiJac8LfdSQFdR6FJf6aF9"
+dirm = "3JXLqa4oqswBh4knQrVUJh1iyxjTufF5kijDiSsQZSx8"
 
 [programs.devnet]
-seth_bridge = "5V3anofFhgpB9D8Uc72JDHg1VVH8qxJJrtaEMMxS4kmw"
+seth_bridge = "2PpwtfR2QHfR7qGhH8eaeiTiJac8LfdSQFdR6FJf6aF9"
+dirm = "3JXLqa4oqswBh4knQrVUJh1iyxjTufF5kijDiSsQZSx8"
 
 [scripts]
 initialize = "node scripts/initialize.js"

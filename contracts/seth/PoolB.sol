@@ -3,14 +3,14 @@ pragma solidity ^0.8.20;
 
 /**
  * @title PoolB - Seth Pricing Pool
- * @notice SETH/sUSDC 定价池，仅允许国库作为 LP
- * @dev Ownable 功能已内联，不依赖外部库
- *      池 B 仅允许国库作为唯一 LP，防止外部操纵
+ * @notice SETH/sUSDC pricing pool, only allows Treasury as LP
+ * @dev Ownable functionality inlined, no external dependencies
+ *      Pool B only allows Treasury as the sole LP to prevent external manipulation
  * 
- * 重要说明：SETH 是 Seth 链的原生代币（类似 ETH），不是 ERC20 代币
+ * Important: SETH is the native token of Seth chain (similar to ETH), not an ERC20 token
  */
 contract PoolB {
-    // ==================== Ownable 功能（内联） ====================
+    // ==================== Ownable Functionality (Inlined) ====================
     
     address private _owner;
 
@@ -36,39 +36,39 @@ contract PoolB {
         _owner = newOwner;
     }
 
-    // ==================== 合约状态 ====================
+    // ==================== Contract State ====================
     
-    // 代币接口
-    // SETH 是原生代币，不需要合约地址
-    address public susdcToken;     // sUSDC 代币地址
-    address public treasury;       // 国库地址（唯一LP）
+    // Token interface
+    // SETH is native token, no contract address needed
+    address public susdcToken;     // sUSDC token address
+    address public treasury;       // Treasury address (sole LP)
     
-    // 储备量
-    uint256 public reserveSETH;    // 原生 SETH 储备
-    uint256 public reservesUSDC;   // sUSDC 储备
+    // Reserves
+    uint256 public reserveSETH;    // Native SETH reserve
+    uint256 public reservesUSDC;   // sUSDC reserve
     
-    // 累计交易量（用于统计）
+    // Cumulative trading volume (for statistics)
     uint256 public totalVolumeSETH;
     uint256 public totalVolumesUSDC;
     uint256 public totalTransactions;
     
-    // 价格历史记录（用于价格发现）
+    // Price history (for price discovery)
     struct PriceRecord {
         uint256 timestamp;
-        uint256 price;         // SETH 价格（以 sUSDC 计价）
-        uint256 volume;        // 交易量
+        uint256 price;         // SETH price (denominated in sUSDC)
+        uint256 volume;        // Trading volume
     }
     
     PriceRecord[] public priceHistory;
     uint256 public constant MAX_PRICE_RECORDS = 1000;
     
-    // ==================== 事件 ====================
+    // ==================== Events ====================
     
     event LiquidityAdded(uint256 amountSETH, uint256 amountSUSDC, uint256 newReserveSETH, uint256 newReservesUSDC);
     event LiquidityRemoved(uint256 amountSETH, uint256 amountSUSDC, address to);
     event SwapExecuted(
         address indexed user,
-        bool isBuySETH,          // true: 买SETH, false: 卖SETH
+        bool isBuySETH,          // true: buy SETH, false: sell SETH
         uint256 amountIn,
         uint256 amountOut,
         uint256 price,
@@ -82,7 +82,7 @@ contract PoolB {
         _;
     }
 
-    // ==================== 构造函数 ====================
+    // ==================== Constructor ====================
 
     constructor(address _susdcToken, address _treasury) {
         _owner = msg.sender;
@@ -92,26 +92,26 @@ contract PoolB {
         treasury = _treasury;
     }
 
-    // 接收原生 SETH
+    // Receive native SETH
     receive() external payable {
         emit NativeSETHReceived(msg.sender, msg.value);
     }
 
-    // ==================== 配置函数 ====================
+    // ==================== Configuration Functions ====================
 
     /**
-     * @dev 更新国库地址
+     * @dev Update treasury address
      */
     function setTreasury(address _newTreasury) external onlyOwner {
         emit TreasuryUpdated(treasury, _newTreasury);
         treasury = _newTreasury;
     }
 
-    // ==================== 价格计算 ====================
+    // ==================== Price Calculation ====================
 
     /**
-     * @dev 获取当前价格（1 SETH = ? sUSDC）
-     * @return price SETH 价格（18位精度）
+     * @dev Get current price (1 SETH = ? sUSDC)
+     * @return price SETH price (18 decimal precision)
      */
     function getPrice() public view returns (uint256 price) {
         if (reserveSETH == 0) return 0;
@@ -120,11 +120,11 @@ contract PoolB {
     }
 
     /**
-     * @dev 计算交易输出量
-     * @param amountIn 输入数量
-     * @param reserveIn 输入代币储备
-     * @param reserveOut 输出代币储备
-     * @return amountOut 输出数量
+     * @dev Calculate trade output amount
+     * @param amountIn Input amount
+     * @param reserveIn Input token reserve
+     * @param reserveOut Output token reserve
+     * @return amountOut Output amount
      */
     function getAmountOut(
         uint256 amountIn,
@@ -134,39 +134,39 @@ contract PoolB {
         require(amountIn > 0, "PoolB: Zero input");
         require(reserveIn > 0 && reserveOut > 0, "PoolB: Insufficient liquidity");
         
-        // 恒定乘积公式: amountOut = (amountIn * reserveOut) / (reserveIn + amountIn)
-        uint256 amountInWithFee = amountIn; // 池B无手续费，国库独享
+        // Constant product formula: amountOut = (amountIn * reserveOut) / (reserveIn + amountIn)
+        uint256 amountInWithFee = amountIn; // Pool B has no fee, treasury exclusive
         amountOut = (amountInWithFee * reserveOut) / (reserveIn + amountInWithFee);
     }
 
-    // ==================== 交易功能 ====================
+    // ==================== Trading Functions ====================
 
     /**
-     * @dev 买入 SETH（用 sUSDC 购买）
-     * @param amountSUSDCIn 输入的 sUSDC 数量
-     * @param minSETHOut 最小输出的 SETH 数量（滑点保护）
-     * @return amountSETHOut 获得的 SETH 数量
+     * @dev Buy SETH (using sUSDC)
+     * @param amountSUSDCIn Input sUSDC amount
+     * @param minSETHOut Minimum output SETH amount (slippage protection)
+     * @return amountSETHOut Received SETH amount
      */
     function buySETH(uint256 amountSUSDCIn, uint256 minSETHOut) external returns (uint256 amountSETHOut) {
-        // 1. 转入 sUSDC
+        // 1. Transfer in sUSDC
         require(_transferFrom(susdcToken, msg.sender, address(this), amountSUSDCIn), "PoolB: sUSDC transfer failed");
         
-        // 2. 计算输出
+        // 2. Calculate output
         amountSETHOut = getAmountOut(amountSUSDCIn, reservesUSDC, reserveSETH);
         require(amountSETHOut >= minSETHOut, "PoolB: Slippage exceeded");
         
-        // 3. 更新储备
+        // 3. Update reserves
         reservesUSDC += amountSUSDCIn;
         reserveSETH -= amountSETHOut;
         
-        // 4. 转出原生 SETH
+        // 4. Transfer out native SETH
         (bool success, ) = msg.sender.call{value: amountSETHOut}("");
         require(success, "PoolB: SETH transfer failed");
         
-        // 5. 记录价格
+        // 5. Record price
         _recordPrice(amountSUSDCIn, true);
         
-        // 6. 更新统计
+        // 6. Update statistics
         totalVolumesUSDC += amountSUSDCIn;
         totalVolumeSETH += amountSETHOut;
         totalTransactions++;
@@ -175,29 +175,29 @@ contract PoolB {
     }
 
     /**
-     * @dev 卖出 SETH（获得 sUSDC）- 发送原生 SETH
-     * @param minSUSDCOut 最小输出的 sUSDC 数量（滑点保护）
-     * @return amountSUSDCOut 获得的 sUSDC 数量
+     * @dev Sell SETH (receive sUSDC) - Send native SETH
+     * @param minSUSDCOut Minimum output sUSDC amount (slippage protection)
+     * @return amountSUSDCOut Received sUSDC amount
      */
     function sellSETH(uint256 minSUSDCOut) external payable returns (uint256 amountSUSDCOut) {
         uint256 amountSETHIn = msg.value;
         require(amountSETHIn > 0, "PoolB: Zero SETH input");
         
-        // 1. 计算输出
+        // 1. Calculate output
         amountSUSDCOut = getAmountOut(amountSETHIn, reserveSETH, reservesUSDC);
         require(amountSUSDCOut >= minSUSDCOut, "PoolB: Slippage exceeded");
         
-        // 2. 更新储备（原生 SETH 已通过 msg.value 进入合约）
+        // 2. Update reserves (native SETH already in contract via msg.value)
         reserveSETH += amountSETHIn;
         reservesUSDC -= amountSUSDCOut;
         
-        // 3. 转出 sUSDC
+        // 3. Transfer out sUSDC
         require(_transfer(susdcToken, msg.sender, amountSUSDCOut), "PoolB: sUSDC transfer failed");
         
-        // 4. 记录价格
+        // 4. Record price
         _recordPrice(amountSETHIn, false);
         
-        // 5. 更新统计
+        // 5. Update statistics
         totalVolumeSETH += amountSETHIn;
         totalVolumesUSDC += amountSUSDCOut;
         totalTransactions++;
@@ -205,11 +205,11 @@ contract PoolB {
         emit SwapExecuted(msg.sender, false, amountSETHIn, amountSUSDCOut, getPrice(), block.timestamp);
     }
 
-    // ==================== 流动性管理 ====================
+    // ==================== Liquidity Management ====================
 
     /**
-     * @dev 国库添加流动性 - 发送原生 SETH
-     * @param amountSUSDC sUSDC 数量
+     * @dev Treasury adds liquidity - Send native SETH
+     * @param amountSUSDC sUSDC amount
      */
     function addLiquidity(uint256 amountSUSDC) external payable onlyTreasury {
         uint256 amountSETH = msg.value;
@@ -218,7 +218,7 @@ contract PoolB {
         
         require(_transferFrom(susdcToken, msg.sender, address(this), amountSUSDC), "PoolB: sUSDC transfer failed");
         
-        // 原生 SETH 已通过 msg.value 进入合约
+        // Native SETH already in contract via msg.value
         reserveSETH += amountSETH;
         reservesUSDC += amountSUSDC;
         
@@ -226,10 +226,10 @@ contract PoolB {
     }
 
     /**
-     * @dev 国库移除流动性
-     * @param amountSETH 要移除的 SETH 数量
-     * @param amountSUSDC 要移除的 sUSDC 数量
-     * @param to 接收地址
+     * @dev Treasury removes liquidity
+     * @param amountSETH SETH amount to remove
+     * @param amountSUSDC sUSDC amount to remove
+     * @param to Receiving address
      */
     function removeLiquidity(uint256 amountSETH, uint256 amountSUSDC, address payable to) external onlyTreasury {
         require(amountSETH <= reserveSETH && amountSUSDC <= reservesUSDC, "PoolB: Insufficient reserves");
@@ -237,26 +237,26 @@ contract PoolB {
         reserveSETH -= amountSETH;
         reservesUSDC -= amountSUSDC;
         
-        // 发送原生 SETH
+        // Send native SETH
         (bool successSETH, ) = to.call{value: amountSETH}("");
         require(successSETH, "PoolB: SETH transfer failed");
         
-        // 发送 sUSDC
+        // Send sUSDC
         require(_transfer(susdcToken, to, amountSUSDC), "PoolB: sUSDC transfer failed");
         
         emit LiquidityRemoved(amountSETH, amountSUSDC, to);
     }
 
-    // ==================== 价格历史 ====================
+    // ==================== Price History ====================
 
     /**
-     * @dev 记录价格历史
+     * @dev Record price history
      */
     function _recordPrice(uint256 volume, bool isBuy) internal {
         uint256 currentPrice = getPrice();
         
         if (priceHistory.length >= MAX_PRICE_RECORDS) {
-            // 移除最旧的记录
+            // Remove oldest record
             for (uint256 i = 0; i < priceHistory.length - 1; i++) {
                 priceHistory[i] = priceHistory[i + 1];
             }
@@ -275,16 +275,16 @@ contract PoolB {
     }
 
     /**
-     * @dev 获取价格历史记录数量
+     * @dev Get price history record count
      */
     function getPriceHistoryLength() external view returns (uint256) {
         return priceHistory.length;
     }
 
     /**
-     * @dev 批量获取价格历史
-     * @param start 起始索引
-     * @param limit 数量限制
+     * @dev Batch get price history
+     * @param start Start index
+     * @param limit Quantity limit
      */
     function getPriceHistory(uint256 start, uint256 limit) external view returns (PriceRecord[] memory) {
         require(start < priceHistory.length, "PoolB: Start index out of bounds");
@@ -304,10 +304,10 @@ contract PoolB {
         return result;
     }
 
-    // ==================== 查询函数 ====================
+    // ==================== Query Functions ====================
 
     /**
-     * @dev 获取池子状态
+     * @dev Get pool state
      */
     function getPoolState() external view returns (
         uint256 _reserveSETH,
@@ -327,7 +327,7 @@ contract PoolB {
         _nativeBalance = address(this).balance;
     }
 
-    // ==================== 转账辅助函数 ====================
+    // ==================== Transfer Helper Functions ====================
 
     function _transfer(address token, address to, uint256 amount) internal returns (bool) {
         (bool success, bytes memory data) = token.call(
@@ -343,10 +343,10 @@ contract PoolB {
         return success && (data.length == 0 || abi.decode(data, (bool)));
     }
 
-    // ==================== 紧急函数 ====================
+    // ==================== Emergency Functions ====================
 
     /**
-     * @dev 紧急提取原生 SETH (仅Owner)
+     * @dev Emergency withdraw native SETH (Owner only)
      */
     function emergencyWithdrawNative(uint256 amount) external onlyOwner {
         (bool success, ) = owner().call{value: amount}("");
@@ -354,7 +354,7 @@ contract PoolB {
     }
 
     /**
-     * @dev 紧急提取 ERC20 代币 (仅Owner)
+     * @dev Emergency withdraw ERC20 tokens (Owner only)
      */
     function emergencyWithdrawToken(address token, uint256 amount) external onlyOwner {
         (bool success, bytes memory data) = token.call(

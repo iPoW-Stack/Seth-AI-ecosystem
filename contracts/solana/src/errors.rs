@@ -30,6 +30,12 @@ pub enum BridgeError {
     
     #[msg("No pending funds to settle")]
     NoPendingFunds,
+    
+    #[msg("User not registered")]
+    UserNotRegistered,
+    
+    #[msg("Invalid account")]
+    InvalidAccount,
 }
 
 #[error_code]
