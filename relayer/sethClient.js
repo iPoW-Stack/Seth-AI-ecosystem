@@ -23,12 +23,41 @@ function hexToBuffer(hex) {
     return Buffer.from(hex, 'hex');
 }
 
+// Helper: 将 Buffer 正确地 percent-encode，与 Python requests 发送 bytes 的行为一致
+function urlEncodeBytes(buf) {
+    let str = '';
+    for (const byte of buf) {
+        str += '%' + byte.toString(16).padStart(2, '0');
+    }
+    return str;
+}
+
 class SethClient {
-    constructor(host, port) {
+    constructor(host, port, proxyUrl = null) {
         this.baseUrl = `http://${host}:${port}`;
         this.txUrl = `${this.baseUrl}/transaction`;
         this.queryUrl = `${this.baseUrl}/query_account`;
-        this.receiptUrl = `${this.baseUrl}/query_tx_receipt`;
+        // 对齐 Seth 官方 cli.py：交易回执使用 /transaction_receipt
+        this.receiptUrl = `${this.baseUrl}/transaction_receipt`;
+        // 合约查询接口
+        this.queryContractUrl = `${this.baseUrl}/query_contract`;
+
+        // 解析代理（例如 http://127.0.0.1:7890）
+        if (proxyUrl) {
+            try {
+                const u = new URL(proxyUrl);
+                this.proxy = {
+                    protocol: u.protocol.replace(':', ''),
+                    host: u.hostname,
+                    port: u.port ? parseInt(u.port, 10) : 80,
+                };
+            } catch (e) {
+                console.error('[SethClient] Invalid proxy url:', proxyUrl, e.message);
+                this.proxy = null;
+            }
+        } else {
+            this.proxy = null;
+        }
     }
 
     /**
@@ -36,32 +65,60 @@ class SethClient {
      * Logic: Last 20 bytes of Keccak256(RawPublicKey without '04' prefix)
      */
     deriveAddressFromPubkey(pubKeyBytes) {
-        const rawPubKey = pubKeyBytes.slice(1); // Remove '04' prefix
+        // 统一转成 Buffer，避免 Uint8Array / 其他类型导致 keccak 报错
+        const buf = Buffer.isBuffer(pubKeyBytes)
+            ? pubKeyBytes
+            : Buffer.from(pubKeyBytes);
+        const rawPubKey = buf.slice(1); // Remove '04' prefix
         const hash = createKeccakHash('keccak256').update(rawPubKey).digest();
         return '0x' + hash.slice(-20).toString('hex');
     }
 
     /**
+     * 安全解析 query_account 响应（Seth 在地址无效时可能返回纯文本错误而非 JSON）
+     */
+    _parseQueryAccountResponse(resData) {
+        if (resData == null) return null;
+        if (typeof resData === 'object' && !Array.isArray(resData)) return resData;
+        try {
+            const parsed = typeof resData === 'string' ? JSON.parse(resData) : resData;
+            return (parsed && typeof parsed === 'object') ? parsed : null;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
      * Query account info and get the latest Nonce
+     * 注意：参照 cli.py，地址不带 0x 前缀
      */
     async getLatestNonce(addressHex) {
+        // 移除 0x 前缀（与 cli.py 一致）
         if (addressHex.startsWith('0x')) addressHex = addressHex.slice(2);
         
         try {
             const params = new URLSearchParams();
             params.append('address', addressHex);
 
-            const res = await axios.post(this.queryUrl, params, {
+            const axiosConfig = {
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                timeout: 10000
-            });
+                timeout: 10000,
+            };
+            if (this.proxy) {
+                axiosConfig.proxy = this.proxy;
+            }
+
+            const res = await axios.post(this.queryUrl, params, axiosConfig);
 
             if (res.status !== 200) {
                 return 0;
             }
 
-            const data = res.data;
-            const accountInfo = (typeof data === 'string') ? JSON.parse(data) : data;
+            const accountInfo = this._parseQueryAccountResponse(res.data);
+            if (!accountInfo) {
+                console.error(`[SethClient] Get nonce: server returned non-JSON (address may be invalid)`);
+                return 0;
+            }
             return parseInt(accountInfo.nonce || 0, 10);
 
         } catch (error) {
@@ -80,17 +137,25 @@ class SethClient {
             const params = new URLSearchParams();
             params.append('address', addressHex);
 
-            const res = await axios.post(this.queryUrl, params, {
+            const axiosConfig = {
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                timeout: 10000
-            });
+                timeout: 10000,
+            };
+            // if (this.proxy) {
+            //     axiosConfig.proxy = this.proxy;
+            // }
+
+            const res = await axios.post(this.queryUrl, params, axiosConfig);
 
             if (res.status !== 200) {
                 return '0';
             }
 
-            const data = res.data;
-            const accountInfo = (typeof data === 'string') ? JSON.parse(data) : data;
+            const accountInfo = this._parseQueryAccountResponse(res.data);
+            if (!accountInfo) {
+                console.error(`[SethClient] Get balance: server returned non-JSON (address may be invalid)`);
+                return '0';
+            }
             return accountInfo.balance || '0';
 
         } catch (error) {
@@ -101,18 +166,43 @@ class SethClient {
 
     /**
      * Query transaction receipt
+     * 注意: cli.py 直接发送 hex 字符串，不是 bytes
      */
     async getTxReceipt(txHash) {
         try {
+            // 移除 0x 前缀
+            const cleanHash = txHash.replace(/^0x/, '');
+            
+            // 使用 URLSearchParams 构建请求体（与 cli.py 行为一致：直接发送 hex 字符串）
             const params = new URLSearchParams();
-            params.append('tx_hash', txHash);
+            params.append('tx_hash', cleanHash);
 
-            const res = await axios.post(this.receiptUrl, params, {
+            const axiosConfig = {
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                timeout: 10000
-            });
+                timeout: 10000,
+            };
+            if (this.proxy) {
+                axiosConfig.proxy = this.proxy;
+            }
 
-            return res.data;
+            const res = await axios.post(this.receiptUrl, params, axiosConfig);
+
+            if (res.status !== 200) {
+                return null;
+            }
+
+            // 参考 Seth 官方 cli.py：返回 JSON，包含 status 字段（MessageHandleStatus）
+            const data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+            const status = typeof data.status === 'number' ? data.status : null;
+
+            // 与 Python 版本一致：kMessageHandle(1)、kTxAccept(3) 视为“处理中”
+            const IN_PROGRESS = new Set([1, 3]);
+
+            return {
+                raw: data,
+                status,
+                done: status == null ? false : !IN_PROGRESS.has(status),
+            };
         } catch (error) {
             console.error(`[SethClient] Get receipt error: ${error.message}`);
             return null;
@@ -181,9 +271,14 @@ class SethClient {
         const myAddressHex = this.deriveAddressFromPubkey(pubKeyBytes);
 
         // --- 2. Get and Increment Nonce ---
-        const currentNonce = await this.getLatestNonce(myAddressHex);
+        // 重要: 根据 cli.py，当 step=8 (合约调用) 时，获取 nonce 的地址需要是 "to + myAddress"
+        let nonceQueryAddress = myAddressHex;
+        if (txParams.step === 8 && txParams.to) {
+            const toHex = txParams.to.startsWith('0x') ? txParams.to.slice(2) : txParams.to;
+            nonceQueryAddress = toHex + myAddressHex.replace('0x', '');
+        }
+        const currentNonce = await this.getLatestNonce(nonceQueryAddress);
         const nextNonce = currentNonce + 1;
-
         // Merge params with defaults
         const finalParams = {
             amount: 0,
@@ -228,6 +323,7 @@ class SethClient {
             formData.append('sign_s', s);
             formData.append('sign_v', vValue);
 
+            console.log("input is ",finalParams.input);
             if (finalParams.contract_code) formData.append('bytes_code', finalParams.contract_code);
             if (finalParams.input) formData.append('input', finalParams.input);
             if (finalParams.prepayment > 0) formData.append('pepay', finalParams.prepayment);
@@ -255,7 +351,17 @@ class SethClient {
                         success: true,
                         txHash: txHashHex,
                         nonce: nextNonce,
-                        response: retryRes.data
+                        response: retryRes.data,
+                        httpStatus: retryRes.status,
+                        request: {
+                            to: finalParams.to,
+                            amount: finalParams.amount,
+                            gas_limit: finalParams.gas_limit,
+                            gas_price: finalParams.gas_price,
+                            shard_id: finalParams.shard_id,
+                            type: finalParams.step,
+                            nonce: finalParams.nonce,
+                        }
                     };
                 }
             }
@@ -264,7 +370,17 @@ class SethClient {
                 success: true,
                 txHash: txHashHex,
                 nonce: nextNonce,
-                response: res.data
+                response: res.data,
+                httpStatus: res.status,
+                request: {
+                    to: finalParams.to,
+                    amount: finalParams.amount,
+                    gas_limit: finalParams.gas_limit,
+                    gas_price: finalParams.gas_price,
+                    shard_id: finalParams.shard_id,
+                    type: finalParams.step,
+                    nonce: finalParams.nonce,
+                }
             };
         } catch (error) {
             return {
@@ -277,13 +393,51 @@ class SethClient {
     }
 
     /**
-     * Send contract call (step = 2 for contract execution)
+     * Query contract (view/pure functions)
+     * 对应 cli.py 中的 query_contract 接口
+     * 
+     * 注意：参照 cli.py，地址不带 0x 前缀
+     */
+    async queryContract(fromHex, contractAddress, inputData) {
+        // 移除 0x 前缀（与 cli.py 一致）
+        if (fromHex.startsWith('0x')) fromHex = fromHex.slice(2);
+        if (contractAddress.startsWith('0x')) contractAddress = contractAddress.slice(2);
+        
+        try {
+            const params = new URLSearchParams();
+            params.append('from', fromHex);
+            params.append('address', contractAddress);
+            params.append('input', inputData);
+
+            const axiosConfig = {
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                timeout: 10000,
+            };
+            if (this.proxy) {
+                axiosConfig.proxy = this.proxy;
+            }
+
+            const res = await axios.post(this.queryContractUrl, params, axiosConfig);
+
+            if (res.status === 200) {
+                return res.data;
+            }
+            return null;
+        } catch (error) {
+            console.error(`[SethClient] Query contract error: ${error.message}`);
+            return null;
+        }
+    }
+
+    /**
+     * Send contract call (step = 8 for contract execution)
+     * 注意：参照 cli.py，合约调用使用 step=8
      */
     async sendContractCall(privateKeyHex, contractAddress, inputData, options = {}) {
         return this.sendTransaction(privateKeyHex, {
             to: contractAddress,
             input: inputData,
-            step: 2, // Contract execution
+            step: 8, // Contract execution (参照 cli.py step=8)
             amount: options.amount || 0,
             gas_limit: options.gasLimit || 200000,
             gas_price: options.gasPrice || 1,

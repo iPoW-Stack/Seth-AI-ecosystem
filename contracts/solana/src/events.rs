@@ -1,10 +1,10 @@
-//! 事件定义模块
+//! Event Definition Module
 
 use anchor_lang::prelude::*;
 
-// ==================== Bridge 事件 ====================
+// ==================== Bridge Events ====================
 
-/// 推荐关系设置事件
+/// Referrer relationship set event
 #[event]
 pub struct ReferrerSet {
     pub user: Pubkey,
@@ -12,7 +12,7 @@ pub struct ReferrerSet {
     pub timestamp: i64,
 }
 
-/// 跨链完成事件
+/// Cross-chain completed event
 #[event]
 pub struct CrossChainCompleted {
     pub solana_tx_sig: Pubkey,
@@ -21,16 +21,16 @@ pub struct CrossChainCompleted {
     pub timestamp: i64,
 }
 
-/// Relayer 更新事件
+/// Relayer updated event
 #[event]
 pub struct RelayerUpdated {
     pub old_relayer: Pubkey,
     pub new_relayer: Pubkey,
 }
 
-// ==================== Revenue 事件 ====================
+// ==================== Revenue Events ====================
 
-/// 收入处理事件 (15-50-35 分账)
+/// Revenue processed event (10-5-5-50-30 distribution)
 #[event]
 pub struct RevenueProcessed {
     pub user: Pubkey,
@@ -43,10 +43,12 @@ pub struct RevenueProcessed {
     pub l1_referrer: Option<Pubkey>,
     pub l2_referrer: Option<Pubkey>,
     pub product_type: u8,
+    /// Seth recipient address (20 bytes EVM address)
+    pub seth_recipient: [u8; 20],
     pub timestamp: i64,
 }
 
-/// 佣金提取事件
+/// Commission withdrawn event
 #[event]
 pub struct CommissionWithdrawn {
     pub user: Pubkey,
@@ -54,10 +56,29 @@ pub struct CommissionWithdrawn {
     pub timestamp: i64,
 }
 
-/// 月底清算事件
+/// Monthly settlement event
 #[event]
 pub struct MonthlySettlement {
     pub team_funds: u64,
     pub project_funds: u64,
+    pub timestamp: i64,
+}
+
+// ==================== Seth Withdrawal Events ====================
+
+/// Seth withdrawal processed event (Seth -> Solana)
+#[event]
+pub struct SethWithdrawalProcessed {
+    /// Seth transaction hash
+    pub seth_tx_hash: [u8; 32],
+    /// Seth user address
+    pub seth_user: [u8; 20],
+    /// Solana recipient
+    pub solana_recipient: Pubkey,
+    /// sUSDC amount swapped
+    pub susdc_amount: u64,
+    /// USDC amount received
+    pub usdc_amount: u64,
+    /// Timestamp
     pub timestamp: i64,
 }

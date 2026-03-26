@@ -11,6 +11,7 @@ pub mod events;
 pub mod state;
 pub mod bridge;
 pub mod revenue;
+pub mod withdrawal;
 
 // Re-export public interfaces
 pub use constants::*;
@@ -19,9 +20,10 @@ pub use events::*;
 pub use state::*;
 pub use bridge::*;
 pub use revenue::*;
+pub use withdrawal::*;
 
 // Program ID (replace when deploying)
-declare_id!("5V3anofFhgpB9D8Uc72JDHg1VVH8qxJJrtaEMMxS4kmw");
+declare_id!("125eQs1s3SNxd5KFRpAJ6JvtVpD4tRYw6fWKomibQ8tc");
 
 #[program]
 pub mod seth_bridge {
@@ -32,6 +34,11 @@ pub mod seth_bridge {
     /// Initialize bridge configuration
     pub fn initialize(ctx: Context<Initialize>, seth_treasury: Pubkey) -> Result<()> {
         handle_initialize(ctx, seth_treasury)
+    }
+
+    /// Initialize root user (owner) - creates first user without requiring referrer
+    pub fn init_root_user(ctx: Context<InitRootUser>) -> Result<()> {
+        handle_init_root_user(ctx)
     }
 
     /// Set referrer relationship
@@ -52,6 +59,11 @@ pub mod seth_bridge {
         handle_set_relayer(ctx, new_relayer)
     }
 
+    /// Close user info account (returns rent to user)
+    pub fn close_user_info(ctx: Context<CloseUserInfo>) -> Result<()> {
+        handle_close_user_info(ctx)
+    }
+
     // ==================== Revenue Instructions ====================
 
     /// Process revenue and execute 15-50-35 distribution
@@ -64,6 +76,14 @@ pub mod seth_bridge {
         handle_process_revenue(ctx, amount, product_type, seth_recipient)
     }
 
+    /// Distribute commission to referrer
+    pub fn distribute_commission(
+        ctx: Context<DistributeCommission>,
+        amount: u64,
+    ) -> Result<()> {
+        handle_distribute_commission(ctx, amount)
+    }
+
     /// User withdraws commission
     pub fn withdraw_commission(ctx: Context<WithdrawCommission>) -> Result<()> {
         handle_withdraw_commission(ctx)
@@ -72,5 +92,28 @@ pub mod seth_bridge {
     /// Manually trigger monthly settlement
     pub fn trigger_settlement(ctx: Context<TriggerSettlement>) -> Result<()> {
         handle_trigger_settlement(ctx)
+    }
+
+    // ==================== Seth Withdrawal Instructions (Seth -> Solana) ====================
+
+    /// Process Seth withdrawal - records withdrawal, deducts fee, and mints sUSDC
+    /// Called by relayer when SwapExecuted event detected on Seth (isBuySETH=false)
+    /// 
+    /// Arguments:
+    /// - seth_tx_hash: Seth transaction hash for replay protection
+    /// - seth_user: Seth user address (20 bytes)
+    /// - susdc_amount: Total sUSDC amount to mint (before fee deduction)
+    /// - cross_chain_fee: Fee in sUSDC to compensate relayer for Solana gas
+    /// 
+    /// User receives: susdc_amount - cross_chain_fee
+    /// Relayer receives: cross_chain_fee
+    pub fn process_seth_withdrawal(
+        ctx: Context<ProcessSethWithdrawal>,
+        seth_tx_hash: [u8; 32],
+        seth_user: [u8; 20],
+        susdc_amount: u64,
+        cross_chain_fee: u64,
+    ) -> Result<()> {
+        handle_process_seth_withdrawal(ctx, seth_tx_hash, seth_user, susdc_amount, cross_chain_fee)
     }
 }

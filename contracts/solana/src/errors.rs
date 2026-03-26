@@ -30,6 +30,12 @@ pub enum BridgeError {
     
     #[msg("No pending funds to settle")]
     NoPendingFunds,
+    
+    #[msg("User not registered")]
+    UserNotRegistered,
+    
+    #[msg("Invalid account")]
+    InvalidAccount,
 }
 
 #[error_code]
@@ -45,4 +51,25 @@ pub enum RevenueError {
     
     #[msg("User not registered")]
     UserNotRegistered,
+}
+
+#[error_code]
+pub enum SethWithdrawalError {
+    #[msg("Seth withdrawal already processed")]
+    AlreadyProcessed,
+    
+    #[msg("Seth withdrawal not found")]
+    NotFound,
+    
+    #[msg("Insufficient sUSDC balance for swap")]
+    InsufficientSUSDC,
+    
+    #[msg("Swap failed")]
+    SwapFailed,
+    
+    #[msg("Invalid recipient")]
+    InvalidRecipient,
+    
+    #[msg("Unauthorized relayer")]
+    UnauthorizedRelayer,
 }

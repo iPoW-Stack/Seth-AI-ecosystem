@@ -9,9 +9,14 @@
     "deploy:full": "node scripts/deploy.js",
     "init": "node scripts/initialize.js",
     "dirm:create": "node scripts/create-dirm.js",
+    "susdc:create": "node scripts/create-susdc.js",
+    "bridge:init": "node scripts/initialize-bridge.js",
+    "pool:init": "node scripts/initialize-pool.js",
+    "deploy:all": "node scripts/deploy-all.js",
     "clean": "rm -rf target node_modules"
   },
   "dependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
     "@project-serum/anchor": "^0.26.0",
     "@solana/spl-token": "^0.3.8",
     "@solana/web3.js": "^1.87.0",

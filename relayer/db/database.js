@@ -1,8 +1,10 @@
 const { Pool } = require('pg');
+const fs = require('fs');
+const path = require('path');
 
 /**
- * 数据库操作类
- * 负责跨链消息的持久化存储和查询
+ * Database Operations Class
+ * Responsible for persistent storage and querying of cross-chain messages
  */
 class Database {
     constructor(config) {
@@ -20,10 +22,12 @@ class Database {
         this.pool.on('error', (err) => {
             console.error('[DB] Unexpected error on idle client:', err.message);
         });
+        
+        this.initialized = false;
     }
 
     /**
-     * 测试数据库连接
+     * Test database connection
      */
     async testConnection() {
         try {
@@ -39,26 +43,219 @@ class Database {
     }
 
     /**
-     * 关闭数据库连接池
+     * Check if a table exists
+     * @param {string} tableName - Table name to check
+     * @returns {Promise<boolean>}
+     */
+    async tableExists(tableName) {
+        const query = `
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = $1
+            )
+        `;
+        const result = await this.pool.query(query, [tableName]);
+        return result.rows[0].exists;
+    }
+
+    /**
+     * Run database migrations - create tables if they don't exist
+     * This is called automatically on first startup
+     */
+    async runMigrations() {
+        console.log('[DB] Checking database schema...');
+        
+        try {
+            // Check if main tables exist
+            const messagesTableExists = await this.tableExists('cross_chain_messages');
+            const relayerStatusExists = await this.tableExists('relayer_status');
+            const logsTableExists = await this.tableExists('operation_logs');
+            
+            if (messagesTableExists && relayerStatusExists && logsTableExists) {
+                console.log('[DB] Database schema already exists, skipping migration');
+                this.initialized = true;
+                return true;
+            }
+            
+            console.log('[DB] Running database migrations...');
+            
+            // Read and execute init.sql
+            const initSqlPath = path.join(__dirname, 'init.sql');
+            
+            if (!fs.existsSync(initSqlPath)) {
+                console.error('[DB] init.sql not found, creating tables programmatically');
+                await this.createTablesProgrammatically();
+            } else {
+                const sql = fs.readFileSync(initSqlPath, 'utf8');
+                await this.pool.query(sql);
+                console.log('[DB] Database schema created from init.sql');
+            }
+            
+            this.initialized = true;
+            console.log('[DB] Database migrations completed successfully');
+            return true;
+            
+        } catch (error) {
+            console.error('[DB] Migration failed:', error.message);
+            
+            // Try programmatic creation as fallback
+            try {
+                await this.createTablesProgrammatically();
+                this.initialized = true;
+                console.log('[DB] Tables created programmatically as fallback');
+                return true;
+            } catch (fallbackError) {
+                console.error('[DB] Fallback table creation also failed:', fallbackError.message);
+                return false;
+            }
+        }
+    }
+
+    /**
+     * Create tables programmatically (fallback if init.sql is not available)
+     */
+    async createTablesProgrammatically() {
+        // Create cross_chain_messages table
+        await this.pool.query(`
+            CREATE TABLE IF NOT EXISTS cross_chain_messages (
+                id SERIAL PRIMARY KEY,
+                solana_tx_sig VARCHAR(88) NOT NULL UNIQUE,
+                solana_tx_sig_bytes32 VARCHAR(66) NOT NULL,
+                sender_solana VARCHAR(50),
+                amount NUMERIC(78, 0) NOT NULL,
+                team_funds NUMERIC(78, 0) DEFAULT 0,
+                recipient_eth VARCHAR(42) NOT NULL,
+                solana_block_time BIGINT,
+                status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                seth_tx_hash VARCHAR(66),
+                seth_block_number BIGINT,
+                retry_count INTEGER DEFAULT 0,
+                max_retries INTEGER DEFAULT 5,
+                next_retry_at TIMESTAMP,
+                last_error TEXT,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW(),
+                processed_at TIMESTAMP,
+                CONSTRAINT valid_status CHECK (status IN ('pending', 'processing', 'completed', 'failed'))
+            )
+        `);
+        
+        // Create indexes for cross_chain_messages
+        await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_status ON cross_chain_messages(status)`);
+        await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_created_at ON cross_chain_messages(created_at)`);
+        await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_solana_tx_sig ON cross_chain_messages(solana_tx_sig)`);
+        
+        // Create relayer_status table
+        await this.pool.query(`
+            CREATE TABLE IF NOT EXISTS relayer_status (
+                id SERIAL PRIMARY KEY,
+                relayer_address VARCHAR(42),
+                last_processed_slot BIGINT,
+                last_processed_signature VARCHAR(88),
+                is_active BOOLEAN DEFAULT FALSE,
+                started_at TIMESTAMP,
+                last_heartbeat TIMESTAMP,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        `);
+        
+        // Insert default relayer status if not exists
+        await this.pool.query(`
+            INSERT INTO relayer_status (is_active) 
+            SELECT FALSE 
+            WHERE NOT EXISTS (SELECT 1 FROM relayer_status)
+        `);
+        
+        // Create operation_logs table
+        await this.pool.query(`
+            CREATE TABLE IF NOT EXISTS operation_logs (
+                id SERIAL PRIMARY KEY,
+                message_id INTEGER REFERENCES cross_chain_messages(id),
+                operation VARCHAR(50) NOT NULL,
+                details JSONB,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        `);
+        
+        // Create indexes for operation_logs
+        await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_logs_message_id ON operation_logs(message_id)`);
+        await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_logs_operation ON operation_logs(operation)`);
+        
+        // Create update timestamp trigger function
+        await this.pool.query(`
+            CREATE OR REPLACE FUNCTION update_timestamp()
+            RETURNS TRIGGER AS $$
+            BEGIN
+                NEW.updated_at = NOW();
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+        `);
+        
+        // Apply triggers (drop if exists first to avoid errors)
+        await this.pool.query(`
+            DROP TRIGGER IF EXISTS update_messages_timestamp ON cross_chain_messages
+        `);
+        await this.pool.query(`
+            CREATE TRIGGER update_messages_timestamp
+                BEFORE UPDATE ON cross_chain_messages
+                FOR EACH ROW
+                EXECUTE FUNCTION update_timestamp()
+        `);
+        
+        await this.pool.query(`
+            DROP TRIGGER IF EXISTS update_relayer_timestamp ON relayer_status
+        `);
+        await this.pool.query(`
+            CREATE TRIGGER update_relayer_timestamp
+                BEFORE UPDATE ON relayer_status
+                FOR EACH ROW
+                EXECUTE FUNCTION update_timestamp()
+        `);
+        
+        console.log('[DB] All tables and indexes created successfully');
+    }
+
+    /**
+     * Initialize database - call this before using the database
+     */
+    async initialize() {
+        const connected = await this.testConnection();
+        if (!connected) {
+            throw new Error('Database connection failed');
+        }
+        
+        const migrated = await this.runMigrations();
+        if (!migrated) {
+            throw new Error('Database migration failed');
+        }
+        
+        return true;
+    }
+
+    /**
+     * Close database connection pool
      */
     async close() {
         await this.pool.end();
         console.log('[DB] Connection pool closed');
     }
 
-    // ==================== 跨链消息操作 ====================
+    // ==================== Cross-Chain Message Operations ====================
 
     /**
-     * 插入新的跨链消息
-     * @param {Object} message - 消息数据
-     * @returns {Promise<Object>} 插入的记录
+     * Insert new cross-chain message
+     * @param {Object} message - Message data
+     * @returns {Promise<Object>} Inserted record
      */
     async insertMessage(message) {
         const query = `
             INSERT INTO cross_chain_messages (
-                solana_tx_sig, solana_tx_sig_bytes32, amount, 
+                solana_tx_sig, solana_tx_sig_bytes32, amount, team_funds,
                 recipient_eth, sender_solana, solana_block_time, status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (solana_tx_sig) DO NOTHING
             RETURNING *
         `;
@@ -67,6 +264,7 @@ class Database {
             message.solanaTxSig,
             message.solanaTxSigBytes32,
             message.amount,
+            message.teamFunds || 0,
             message.recipientEth,
             message.senderSolana,
             message.solanaBlockTime,
@@ -78,8 +276,8 @@ class Database {
     }
 
     /**
-     * 根据Solana交易签名查询消息
-     * @param {string} solanaTxSig - Solana交易签名
+     * Get message by Solana transaction signature
+     * @param {string} solanaTxSig - Solana transaction signature
      * @returns {Promise<Object|null>}
      */
     async getMessageBySig(solanaTxSig) {
@@ -89,8 +287,8 @@ class Database {
     }
 
     /**
-     * 检查消息是否已处理
-     * @param {string} solanaTxSig - Solana交易签名
+     * Check if message has been processed
+     * @param {string} solanaTxSig - Solana transaction signature
      * @returns {Promise<boolean>}
      */
     async isProcessed(solanaTxSig) {
@@ -103,8 +301,8 @@ class Database {
     }
 
     /**
-     * 更新消息状态为处理中
-     * @param {number} messageId - 消息ID
+     * Update message status to processing
+     * @param {number} messageId - Message ID
      * @returns {Promise<void>}
      */
     async markAsProcessing(messageId) {
@@ -117,9 +315,9 @@ class Database {
     }
 
     /**
-     * 更新消息状态为完成
-     * @param {number} messageId - 消息ID
-     * @param {Object} txInfo - Seth交易信息
+     * Update message status to completed
+     * @param {number} messageId - Message ID
+     * @param {Object} txInfo - Seth transaction info
      */
     async markAsCompleted(messageId, txInfo) {
         const query = `
@@ -141,10 +339,10 @@ class Database {
     }
 
     /**
-     * 更新消息状态为失败
-     * @param {number} messageId - 消息ID
-     * @param {string} error - 错误信息
-     * @param {number} maxRetries - 最大重试次数
+     * Update message status to failed
+     * @param {number} messageId - Message ID
+     * @param {string} error - Error message
+     * @param {number} maxRetries - Maximum retry count
      */
     async markAsFailed(messageId, error, maxRetries = 5) {
         const query = `
@@ -173,8 +371,8 @@ class Database {
     }
 
     /**
-     * 获取待重试的失败消息
-     * @param {number} limit - 最大返回数量
+     * Get failed messages pending retry
+     * @param {number} limit - Maximum return count
      * @returns {Promise<Array>}
      */
     async getPendingRetries(limit = 10) {
@@ -192,8 +390,8 @@ class Database {
     }
 
     /**
-     * 获取所有待处理消息
-     * @param {number} limit - 最大返回数量
+     * Get all pending messages
+     * @param {number} limit - Maximum return count
      * @returns {Promise<Array>}
      */
     async getPendingMessages(limit = 100) {
@@ -208,7 +406,7 @@ class Database {
     }
 
     /**
-     * 获取消息统计信息
+     * Get message statistics
      * @returns {Promise<Object>}
      */
     async getStats() {
@@ -237,10 +435,10 @@ class Database {
         return stats;
     }
 
-    // ==================== Relayer状态操作 ====================
+    // ==================== Relayer Status Operations ====================
 
     /**
-     * 获取Relayer状态
+     * Get relayer status
      * @returns {Promise<Object>}
      */
     async getRelayerStatus() {
@@ -250,20 +448,19 @@ class Database {
     }
 
     /**
-     * 更新Relayer状态
-     * @param {Object} status - 状态信息
+     * Update relayer status
+     * @param {Object} status - Status info
      */
     async updateRelayerStatus(status) {
         const query = `
             UPDATE relayer_status 
-            SET last_processed_slot = COALESCE($2, last_processed_slot),
-                last_processed_signature = COALESCE($3, last_processed_signature),
-                relayer_address = COALESCE($4, relayer_address),
+            SET last_processed_slot = COALESCE($1, last_processed_slot),
+                last_processed_signature = COALESCE($2, last_processed_signature),
+                relayer_address = COALESCE($3, relayer_address),
                 updated_at = NOW()
             WHERE id = (SELECT MIN(id) FROM relayer_status)
         `;
         await this.pool.query(query, [
-            null, // id placeholder
             status.lastProcessedSlot || null,
             status.lastProcessedSignature || null,
             status.relayerAddress || null
@@ -271,8 +468,8 @@ class Database {
     }
 
     /**
-     * 设置Relayer活跃状态
-     * @param {boolean} isActive - 是否活跃
+     * Set relayer active status
+     * @param {boolean} isActive - Is active
      */
     async setRelayerActive(isActive) {
         const query = `
@@ -283,13 +480,13 @@ class Database {
         await this.pool.query(query, [isActive]);
     }
 
-    // ==================== 操作日志 ====================
+    // ==================== Operation Logs ====================
 
     /**
-     * 记录操作日志
-     * @param {number} messageId - 消息ID
-     * @param {string} operation - 操作类型
-     * @param {Object} details - 操作详情
+     * Log operation
+     * @param {number} messageId - Message ID
+     * @param {string} operation - Operation type
+     * @param {Object} details - Operation details
      */
     async logOperation(messageId, operation, details = {}) {
         const query = `
@@ -300,8 +497,8 @@ class Database {
     }
 
     /**
-     * 获取消息的操作日志
-     * @param {number} messageId - 消息ID
+     * Get operation logs for a message
+     * @param {number} messageId - Message ID
      * @returns {Promise<Array>}
      */
     async getOperationLogs(messageId) {
@@ -314,11 +511,11 @@ class Database {
         return result.rows;
     }
 
-    // ==================== 批量操作 ====================
+    // ==================== Batch Operations ====================
 
     /**
-     * 批量插入消息（用于恢复或初始化）
-     * @param {Array} messages - 消息数组
+     * Batch insert messages (for recovery or initialization)
+     * @param {Array} messages - Message array
      */
     async batchInsertMessages(messages) {
         const client = await this.pool.connect();
@@ -328,14 +525,15 @@ class Database {
             for (const msg of messages) {
                 await client.query(`
                     INSERT INTO cross_chain_messages (
-                        solana_tx_sig, solana_tx_sig_bytes32, amount, 
+                        solana_tx_sig, solana_tx_sig_bytes32, amount, team_funds,
                         recipient_eth, sender_solana, solana_block_time, status
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     ON CONFLICT (solana_tx_sig) DO NOTHING
                 `, [
                     msg.solanaTxSig,
                     msg.solanaTxSigBytes32,
                     msg.amount,
+                    msg.teamFunds || 0,
                     msg.recipientEth,
                     msg.senderSolana,
                     msg.solanaBlockTime,
@@ -353,9 +551,9 @@ class Database {
     }
 
     /**
-     * 清理旧的已完成消息（归档）
-     * @param {number} daysToKeep - 保留天数
-     * @returns {Promise<number>} 删除的记录数
+     * Clean up old completed messages (archive)
+     * @param {number} daysToKeep - Days to keep
+     * @returns {Promise<number>} Number of deleted records
      */
     async archiveOldMessages(daysToKeep = 30) {
         const query = `

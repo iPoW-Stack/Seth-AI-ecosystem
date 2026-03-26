@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 use crate::dirm;
 use crate::errors::DIRMError;
@@ -23,8 +23,15 @@ pub struct Swap<'info> {
     )]
     pub dirm_config: Account<'info, DIRMConfig>,
 
-    pub usdc_mint: Account<'info, Mint>,
-    pub susdc_mint: Account<'info, Mint>,
+    /// USDC mint (not deserialized to reduce stack usage)
+    /// CHECK: validated against pool.usdc_mint
+    #[account(constraint = usdc_mint.key() == pool.usdc_mint)]
+    pub usdc_mint: UncheckedAccount<'info>,
+
+    /// sUSDC mint (not deserialized to reduce stack usage)
+    /// CHECK: validated against pool.susdc_mint
+    #[account(constraint = susdc_mint.key() == pool.susdc_mint)]
+    pub susdc_mint: UncheckedAccount<'info>,
 
     /// Pool USDC vault
     #[account(
