@@ -1,0 +1,47 @@
+{
+  "name": "seth-solana-bridge-relayer",
+  "version": "1.0.0",
+  "description": "Cross-chain bridge relayer for Seth <-> Solana and BSC <-> Solana",
+  "main": "relayer.js",
+  "scripts": {
+    "start": "node relayer.js",
+    "start:bsc": "node bsc-relayer.js",
+    "start:bsc:v2": "node bsc-relayer-v2.js",
+    "dev": "nodemon relayer.js",
+    "dev:bsc": "nodemon bsc-relayer.js",
+    "dev:bsc:v2": "nodemon bsc-relayer-v2.js",
+    "db:init": "psql -U postgres -d bridge_relayer -f db/init.sql",
+    "db:init:bsc": "psql -U postgres -d bridge_relayer_bsc -f db/init.sql",
+    "test": "echo \"No tests yet\" && exit 0",
+    "test:bsc": "node testBscClient.js",
+    "test:bsc:load": "node -e \"const BscClient = require('./bscClient'); console.log('BscClient loaded successfully');\""
+  },
+  "keywords": [
+    "blockchain",
+    "bridge",
+    "relayer",
+    "solana",
+    "seth",
+    "cross-chain"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@solana/web3.js": "^1.87.0",
+    "axios": "^1.6.0",
+    "bs58": "^5.0.0",
+    "buffer": "^6.0.3",
+    "dotenv": "^16.3.1",
+    "ethers": "^6.16.0",
+    "https-proxy-agent": "^7.0.6",
+    "keccak": "^3.0.4",
+    "pg": "^8.11.3",
+    "secp256k1": "^5.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

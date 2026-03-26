@@ -270,13 +270,33 @@ class SethClient {
         // Derive Address
         const myAddressHex = this.deriveAddressFromPubkey(pubKeyBytes);
 
+        // Normalize destination address to plain 40-hex format.
+        // Some configs append shard suffix like "00000", which breaks nonce query address length.
+        const normalizeToAddress = (to) => {
+            if (!to) return to;
+            let hex = String(to).trim().toLowerCase().replace(/^0x/, '');
+            if (hex.length === 45 && hex.endsWith('00000')) {
+                hex = hex.slice(0, 40);
+            }
+            if (hex.length > 40) {
+                hex = hex.slice(0, 40);
+            }
+            if (!/^[0-9a-f]{40}$/.test(hex)) {
+                throw new Error(`Invalid txParams.to address format: ${to}`);
+            }
+            return hex;
+        };
+        const normalizedTo = normalizeToAddress(txParams.to);
+
         // --- 2. Get and Increment Nonce ---
         // 重要: 根据 cli.py，当 step=8 (合约调用) 时，获取 nonce 的地址需要是 "to + myAddress"
         let nonceQueryAddress = myAddressHex;
-        if (txParams.step === 8 && txParams.to) {
-            const toHex = txParams.to.startsWith('0x') ? txParams.to.slice(2) : txParams.to;
+        if (txParams.step === 8 && normalizedTo) {
+            console.log("txParams.to: ", normalizedTo);
+            const toHex = normalizedTo;
             nonceQueryAddress = toHex + myAddressHex.replace('0x', '');
         }
+        console.log("nonceQueryAddress: ",nonceQueryAddress);
         const currentNonce = await this.getLatestNonce(nonceQueryAddress);
         const nextNonce = currentNonce + 1;
         // Merge params with defaults
@@ -292,6 +312,7 @@ class SethClient {
             key: '',
             val: '',
             ...txParams,
+            to: normalizedTo || txParams.to,
             nonce: nextNonce,
             pubkey: pubKeyHex
         };

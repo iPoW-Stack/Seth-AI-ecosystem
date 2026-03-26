@@ -53,6 +53,9 @@ const CONFIG = {
     }
 };
 
+// PostgreSQL BIGINT is signed int64.
+const MAX_DB_BIGINT = (1n << 63n) - 1n;
+
 // ==================== Relayer Class ====================
 class BridgeRelayer {
     constructor() {
@@ -225,7 +228,11 @@ class BridgeRelayer {
                 return;
             }
 
-            const txSignature = ctx.signature;
+            const txSignature = logs.signature;
+            if (!txSignature) {
+                console.warn('[Relayer] Skip log callback without signature');
+                return;
+            }
             console.log(`[Relayer] Detected potential cross-chain tx: ${txSignature}`);
 
             const alreadyProcessed = await this.db.isProcessed(txSignature);
@@ -353,6 +360,11 @@ class BridgeRelayer {
                 return null;
             }
 
+            const normalizedAmount = this.normalizeDbBigInt(amount, 'amount', txSignature);
+            if (normalizedAmount === null) return null;
+            const normalizedTeamFunds = this.normalizeDbBigInt(teamFunds || 0n, 'team_funds', txSignature);
+            if (normalizedTeamFunds === null) return null;
+
             // Convert Solana signature to bytes32
             const sigBytes = bs58.decode(txSignature);
             const solanaTxSigBytes32 = '0x' + createKeccakHash('keccak256')
@@ -362,8 +374,8 @@ class BridgeRelayer {
             return {
                 solanaTxSig: txSignature,
                 solanaTxSigBytes32,
-                amount: amount.toString(),
-                teamFunds: teamFunds ? teamFunds.toString() : '0',
+                amount: normalizedAmount.toString(),
+                teamFunds: normalizedTeamFunds.toString(),
                 recipientEth,
                 senderSolana: senderSolana || 'unknown',
                 solanaBlockTime: txDetails.blockTime
@@ -501,6 +513,24 @@ class BridgeRelayer {
             }
             return null;
         } catch (error) {
+            return null;
+        }
+    }
+
+    /**
+     * Normalize bigint-like value for PostgreSQL BIGINT.
+     * Returns null when value is invalid/out-of-range so caller can skip that tx.
+     */
+    normalizeDbBigInt(value, fieldName, txSignature) {
+        try {
+            const n = typeof value === 'bigint' ? value : BigInt(value || 0);
+            if (n < 0n || n > MAX_DB_BIGINT) {
+                console.warn(`[Relayer] Skip tx ${txSignature}: ${fieldName} out of BIGINT range (${n.toString()})`);
+                return null;
+            }
+            return n;
+        } catch {
+            console.warn(`[Relayer] Skip tx ${txSignature}: invalid ${fieldName}`);
             return null;
         }
     }
