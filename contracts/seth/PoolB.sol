@@ -72,7 +72,8 @@ contract PoolB {
         uint256 amountIn,
         uint256 amountOut,
         uint256 price,
-        uint256 timestamp
+        uint256 timestamp,
+        bytes32 solanaRecipient  // Solana recipient address (32 bytes, base58 encoded as bytes32)
     );
     event TreasuryUpdated(address oldTreasury, address newTreasury);
     event NativeSETHReceived(address indexed from, uint256 amount);
@@ -142,12 +143,13 @@ contract PoolB {
     // ==================== Trading Functions ====================
 
     /**
-     * @dev Buy SETH (using sUSDC)
+     * @dev Buy SETH (using sUSDC) - sUSDC will be minted on Solana
      * @param amountSUSDCIn Input sUSDC amount
      * @param minSETHOut Minimum output SETH amount (slippage protection)
+     * @param solanaRecipient Solana recipient address (32 bytes) for receiving sUSDC
      * @return amountSETHOut Received SETH amount
      */
-    function buySETH(uint256 amountSUSDCIn, uint256 minSETHOut) external returns (uint256 amountSETHOut) {
+    function buySETH(uint256 amountSUSDCIn, uint256 minSETHOut, bytes32 solanaRecipient) external returns (uint256 amountSETHOut) {
         // 1. Transfer in sUSDC
         require(_transferFrom(susdcToken, msg.sender, address(this), amountSUSDCIn), "PoolB: sUSDC transfer failed");
         
@@ -171,17 +173,19 @@ contract PoolB {
         totalVolumeSETH += amountSETHOut;
         totalTransactions++;
         
-        emit SwapExecuted(msg.sender, true, amountSUSDCIn, amountSETHOut, getPrice(), block.timestamp);
+        emit SwapExecuted(msg.sender, true, amountSUSDCIn, amountSETHOut, getPrice(), block.timestamp, solanaRecipient);
     }
 
     /**
-     * @dev Sell SETH (receive sUSDC) - Send native SETH
+     * @dev Sell SETH (receive sUSDC) - Send native SETH, specify Solana address for cross-chain withdrawal
      * @param minSUSDCOut Minimum output sUSDC amount (slippage protection)
+     * @param solanaRecipient Solana recipient address (32 bytes) for cross-chain withdrawal
      * @return amountSUSDCOut Received sUSDC amount
      */
-    function sellSETH(uint256 minSUSDCOut) external payable returns (uint256 amountSUSDCOut) {
+    function sellSETH(uint256 minSUSDCOut, bytes32 solanaRecipient) external payable returns (uint256 amountSUSDCOut) {
         uint256 amountSETHIn = msg.value;
         require(amountSETHIn > 0, "PoolB: Zero SETH input");
+        require(solanaRecipient != bytes32(0), "PoolB: Zero Solana recipient");
         
         // 1. Calculate output
         amountSUSDCOut = getAmountOut(amountSETHIn, reserveSETH, reservesUSDC);
@@ -191,8 +195,9 @@ contract PoolB {
         reserveSETH += amountSETHIn;
         reservesUSDC -= amountSUSDCOut;
         
-        // 3. Transfer out sUSDC
-        require(_transfer(susdcToken, msg.sender, amountSUSDCOut), "PoolB: sUSDC transfer failed");
+        // 3. For cross-chain withdrawal, sUSDC is burned (not transferred to user)
+        // The sUSDC will be minted on Solana by the relayer
+        require(_burn(susdcToken, amountSUSDCOut), "PoolB: sUSDC burn failed");
         
         // 4. Record price
         _recordPrice(amountSETHIn, false);
@@ -202,7 +207,7 @@ contract PoolB {
         totalVolumesUSDC += amountSUSDCOut;
         totalTransactions++;
         
-        emit SwapExecuted(msg.sender, false, amountSETHIn, amountSUSDCOut, getPrice(), block.timestamp);
+        emit SwapExecuted(msg.sender, false, amountSETHIn, amountSUSDCOut, getPrice(), block.timestamp, solanaRecipient);
     }
 
     // ==================== Liquidity Management ====================
@@ -339,6 +344,13 @@ contract PoolB {
     function _transferFrom(address token, address from, address to, uint256 amount) internal returns (bool) {
         (bool success, bytes memory data) = token.call(
             abi.encodeWithSignature("transferFrom(address,address,uint256)", from, to, amount)
+        );
+        return success && (data.length == 0 || abi.decode(data, (bool)));
+    }
+
+    function _burn(address token, uint256 amount) internal returns (bool) {
+        (bool success, bytes memory data) = token.call(
+            abi.encodeWithSignature("burn(address,uint256)", address(this), amount)
         );
         return success && (data.length == 0 || abi.decode(data, (bool)));
     }
