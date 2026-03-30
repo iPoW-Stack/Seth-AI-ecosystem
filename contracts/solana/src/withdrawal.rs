@@ -110,16 +110,13 @@ pub fn handle_process_seth_withdrawal(
     // 2. Validate amount
     require!(susdc_amount > 0, BridgeError::ZeroAmount);
     
-    // 3. Calculate fee (use provided fee or calculate default)
-    let fee = if cross_chain_fee > 0 {
-        cross_chain_fee
-    } else {
-        calculate_cross_chain_fee(susdc_amount)
-    };
+    // 3. Use fee from relayer (0 = no fee, fee disabled on relayer side)
+    // If fee is enabled but relayer sends 0, the contract trusts the relayer
+    let fee = cross_chain_fee;
     
     // Ensure fee doesn't exceed amount
     require!(
-        fee < susdc_amount,
+        fee <= susdc_amount,
         SethWithdrawalError::InvalidRecipient  // Reuse as "fee exceeds amount"
     );
     
@@ -186,7 +183,7 @@ pub fn handle_process_seth_withdrawal(
     
     msg!(
         "Seth withdrawal processed: seth_tx_hash={}, gross_amount={}, fee={}, net_amount={}, recipient={}",
-        hex::encode(seth_tx_hash),
+        seth_tx_hash.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
         susdc_amount,
         fee,
         user_amount,

@@ -78,12 +78,9 @@ class BridgeRelayer {
     async initialize() {
         console.log('[Relayer] Initializing...');
         
-        // 1. Initialize database
+        // 1. Initialize database (test connection + run migrations)
         this.db = new Database(CONFIG.database);
-        const dbConnected = await this.db.testConnection();
-        if (!dbConnected) {
-            throw new Error('Failed to connect to database');
-        }
+        await this.db.initialize();
 
         // 2. Initialize Solana connection (with proxy support)
         const connOptions = { commitment: CONFIG.solana.commitment };
@@ -194,11 +191,12 @@ class BridgeRelayer {
         const programId = new PublicKey(CONFIG.solana.programId);
         
         // Use onLogs to listen for program logs
+        // Note: onLogs callback signature is (logs, slot) where logs has { err, logs, signature }
         this.solanaConn.onLogs(
             programId,
-            async (logs, ctx) => {
+            async (logs, slot) => {
                 if (this.isShuttingDown) return;
-                await this.handleSolanaLogs(logs, ctx);
+                await this.handleSolanaLogs(logs, slot);
             },
             CONFIG.solana.commitment
         );
@@ -214,18 +212,27 @@ class BridgeRelayer {
 
     /**
      * Handle Solana logs
+     * Note: onLogs callback signature is (logs: { err, logs, signature }, ctx: { slot })
+     * The transaction signature is in the first parameter (logs.signature), not ctx
      */
     async handleSolanaLogs(logs, ctx) {
         try {
             if (logs.err) return;
 
-            const logString = logs.logs.join(' ');
+            const logString = logs.logs?.join(' ') || '';
             
-            if (!logString.includes('CrossChainLock') && !logString.includes('Program data:')) {
+            // Check for RevenueProcessed event or program data
+            if (!logString.includes('Program data:')) {
                 return;
             }
 
-            const txSignature = ctx.signature;
+            // Get signature - it's in logs.signature, not ctx
+            // ctx only contains { slot }
+            const txSignature = logs?.signature;
+            if (!txSignature || typeof txSignature !== 'string') {
+                // No valid signature, skip
+                return;
+            }
             console.log(`[Relayer] Detected potential cross-chain tx: ${txSignature}`);
 
             const alreadyProcessed = await this.db.isProcessed(txSignature);
@@ -254,26 +261,45 @@ class BridgeRelayer {
 
     /**
      * Poll Solana transactions (backup mechanism)
+     * Only polls for NEW transactions since last check
      */
     async pollSolanaTransactions() {
         try {
             const status = await this.db.getRelayerStatus();
             const programId = new PublicKey(CONFIG.solana.programId);
             
+            // Get the last processed signature to only fetch new transactions
+            const until = status?.last_processed_signature;
+            
             const signatures = await this.solanaConn.getSignaturesForAddress(
                 programId,
-                { limit: 10, until: status?.last_processed_signature || undefined },
+                { limit: 5, until: until || undefined },
                 CONFIG.solana.commitment
             );
 
-            for (const sig of signatures.reverse()) {
+            // Process oldest first (reverse order)
+            const sortedSigs = signatures.reverse();
+            
+            // Update last processed signature to the newest one BEFORE processing
+            // This prevents re-processing on next poll cycle
+            if (sortedSigs.length > 0) {
+                const newestSig = sortedSigs[sortedSigs.length - 1].signature;
+                await this.db.updateRelayerStatus({
+                    lastProcessedSignature: newestSig
+                });
+            }
+
+            for (const sig of sortedSigs) {
                 if (sig.err) continue;
                 
                 const alreadyProcessed = await this.db.isProcessed(sig.signature);
                 if (alreadyProcessed) continue;
 
                 const messageData = await this.parseSolanaTransaction(sig.signature);
-                if (!messageData) continue;
+                if (!messageData) {
+                    // Not a RevenueProcessed transaction, skip silently
+                    continue;
+                }
 
                 const savedMessage = await this.db.insertMessage(messageData);
                 if (savedMessage) {
@@ -281,10 +307,6 @@ class BridgeRelayer {
                     await this.db.logOperation(savedMessage.id, 'detect', { source: 'poll' });
                     await this.processMessage(savedMessage);
                 }
-
-                await this.db.updateRelayerStatus({
-                    lastProcessedSignature: sig.signature
-                });
             }
         } catch (error) {
             console.error('[Relayer] Error polling Solana transactions:', error.message);
@@ -296,12 +318,24 @@ class BridgeRelayer {
      */
     async parseSolanaTransaction(txSignature) {
         try {
+            console.log(`[Relayer] Fetching transaction details for ${txSignature}...`);
+            
             const txDetails = await this.solanaConn.getParsedTransaction(
                 txSignature, 
                 { maxSupportedTransactionVersion: 0 }
             );
 
-            if (!txDetails || !txDetails.meta) return null;
+            if (!txDetails) {
+                console.log(`[Relayer] No tx details for ${txSignature}`);
+                return null;
+            }
+            
+            if (!txDetails.meta) {
+                console.log(`[Relayer] No tx meta for ${txSignature}`);
+                return null;
+            }
+            
+            console.log(`[Relayer] Got tx details, logMessages: ${txDetails.meta.logMessages?.length || 0}`);
 
             let amount = null;
             let teamFunds = null;
@@ -309,19 +343,35 @@ class BridgeRelayer {
             let senderSolana = null;
 
             const logMessages = txDetails.meta.logMessages || [];
+            
+            // Get all known discriminators (no logging for performance)
+            const allDiscriminators = this.getAllEventDiscriminators();
+            
             for (const log of logMessages) {
-                if (log.includes('Program log:')) {
-                    const base64Data = log.split('Program log:')[1]?.trim();
+                // Anchor events (emit!) are serialized as base64 in "Program data:" log lines
+                // NOT in "Program log:" which contains text messages (msg!())
+                if (log.includes('Program data:')) {
+                    const base64Data = log.split('Program data:')[1]?.trim();
                     if (base64Data) {
                         try {
-                            const eventData = this.parseAnchorEvent(base64Data);
-                            if (eventData) {
-                                amount = eventData.amount || amount;
-                                teamFunds = eventData.teamFunds || teamFunds;
-                                recipientEth = eventData.recipientEth || recipientEth;
-                                senderSolana = eventData.sender || senderSolana;
+                            const debugBuffer = Buffer.from(base64Data, 'base64');
+                            const discHex = debugBuffer.slice(0, 8).toString('hex');
+                            const eventName = allDiscriminators[discHex];
+                            
+                            // Only process RevenueProcessed events
+                            if (eventName === 'RevenueProcessed') {
+                                const eventData = this.parseAnchorEvent(base64Data);
+                                if (eventData) {
+                                    console.log(`[Relayer] Found RevenueProcessed: amount=${eventData.amount}, recipient=${eventData.recipientEth}`);
+                                    amount = eventData.amount || amount;
+                                    teamFunds = eventData.teamFunds || teamFunds;
+                                    recipientEth = eventData.recipientEth || recipientEth;
+                                    senderSolana = eventData.user || senderSolana;
+                                }
                             }
-                        } catch (e) {}
+                        } catch (e) {
+                            // Silent fail for event parsing
+                        }
                     }
                 }
 
@@ -339,7 +389,7 @@ class BridgeRelayer {
                                txDetails.transaction.message.accountKeys[0].toString();
             }
 
-            if (!amount || !recipientEth) {
+            if (!amount) {
                 const parsedData = this.parseInstructionData(txDetails);
                 if (parsedData) {
                     amount = parsedData.amount || amount;
@@ -347,9 +397,22 @@ class BridgeRelayer {
                     senderSolana = parsedData.sender || senderSolana;
                 }
             }
+            
+            // Fallback: Try to read from CrossChainMessage account
+            if (!amount) {
+                const accountData = await this.parseCrossChainMessageAccount(txDetails);
+                if (accountData) {
+                    console.log(`[Relayer] Found CrossChainMessage account data`);
+                    amount = accountData.amount || amount;
+                    teamFunds = accountData.teamFunds || teamFunds;
+                    recipientEth = accountData.recipientEth || recipientEth;
+                    senderSolana = accountData.sender || senderSolana;
+                }
+            }
 
-            if (!amount || !recipientEth) {
-                console.warn(`[Relayer] Could not parse amount/recipient from ${txSignature}`);
+            // amount is required, recipientEth is optional (not needed for PoolB injection)
+            if (!amount) {
+                // Not a RevenueProcessed transaction
                 return null;
             }
 
@@ -364,21 +427,54 @@ class BridgeRelayer {
                 solanaTxSigBytes32,
                 amount: amount.toString(),
                 teamFunds: teamFunds ? teamFunds.toString() : '0',
-                recipientEth,
+                recipientEth: recipientEth || '0x0000000000000000000000000000000000000000',
                 senderSolana: senderSolana || 'unknown',
                 solanaBlockTime: txDetails.blockTime
             };
 
         } catch (error) {
             console.error(`[Relayer] Error parsing transaction ${txSignature}:`, error.message);
+            console.error(`[Relayer] Error stack:`, error.stack);
             return null;
         }
     }
 
     /**
+     * Get all known event discriminators from IDL
+     * Note: Anchor event discriminators are computed as sha256("event:event_name")[0:8]
+     * But we use the values from the IDL to ensure accuracy
+     */
+    getAllEventDiscriminators() {
+        // Discriminator values from seth_bridge.json IDL events section
+        const idlEvents = {
+            'CommissionWithdrawn': [254, 232, 110, 152, 180, 119, 151, 159],  // feee6e98b477979f
+            'CrossChainCompleted': [31, 133, 249, 252, 26, 228, 226, 174],   // 1f85f9fc1ae4e2ae
+            'MonthlySettlement': [96, 181, 30, 121, 119, 67, 84, 36],        // 60b51e7977c35424
+            'ReferrerSet': [65, 187, 29, 205, 116, 229, 69, 154],            // 41bb1bcd74e5459a
+            'RelayerUpdated': [166, 12, 250, 34, 211, 198, 204, 222],        // a60cfa22d3c6ccde
+            'RevenueProcessed': [181, 26, 199, 237, 159, 186, 73, 241],      // b51ac7ed9fba49f1
+        };
+        
+        const discriminators = {};
+        for (const [name, bytes] of Object.entries(idlEvents)) {
+            const hex = Buffer.from(bytes).toString('hex');
+            discriminators[hex] = name;
+        }
+        return discriminators;
+    }
+
+    /**
+     * Get RevenueProcessed event discriminator from IDL
+     */
+    getRevenueProcessedDiscriminator() {
+        // From IDL: [181, 26, 199, 237, 159, 186, 73, 241] = b51ac7ed9fba49f1
+        return Buffer.from([181, 26, 199, 237, 159, 186, 73, 241]);
+    }
+
+    /**
      * Parse Anchor event data (RevenueProcessed event)
      * 
-     * RevenueProcessed event structure:
+     * RevenueProcessed event structure (updated with seth_recipient):
      * - 8 bytes: event discriminator
      * - 32 bytes: user (Pubkey)
      * - 8 bytes: amount (u64) - original amount
@@ -388,59 +484,67 @@ class BridgeRelayer {
      * - 8 bytes: project_funds (u64)
      * - 8 bytes: ecosystem_funds (u64) - 30% ecosystem funds
      * - 1 byte: has_l1_referrer (bool)
-     * - 32 bytes: l1_referrer (Option<Pubkey>)
+     * - 32 bytes: l1_referrer (Option<Pubkey>) - only if has_l1_referrer
      * - 1 byte: has_l2_referrer (bool)
-     * - 32 bytes: l2_referrer (Option<Pubkey>)
+     * - 32 bytes: l2_referrer (Option<Pubkey>) - only if has_l2_referrer
      * - 1 byte: product_type (u8)
+     * - 20 bytes: seth_recipient (EVM address)
      * - 8 bytes: timestamp (i64)
+     * 
+     * Minimum size with seth_recipient: 8 + 32 + 8*5 + 1 + 1 + 1 + 20 = 103 bytes (no referrers)
+     * Minimum size without seth_recipient (old format): 8 + 32 + 8*5 + 1 + 1 + 1 + 8 = 87 bytes
      */
     parseAnchorEvent(base64Data) {
         try {
             const buffer = Buffer.from(base64Data, 'base64');
+            
+            // Minimum size check: at least discriminator
             if (buffer.length < 8) return null;
+
+            // Check if this is a RevenueProcessed event by discriminator
+            const discriminator = buffer.slice(0, 8);
+            const expectedDiscriminator = this.getRevenueProcessedDiscriminator();
+            
+            if (!discriminator.equals(expectedDiscriminator)) {
+                // Not a RevenueProcessed event, skip silently
+                return null;
+            }
+
+            // Minimum size check: at least discriminator + user + amounts
+            if (buffer.length < 8 + 32 + 8*5) return null;
 
             let offset = 8; // Skip discriminator
             
             // Read user (32 bytes)
-            if (buffer.length < offset + 32) return null;
             offset += 32;
             
             // Read amount (8 bytes)
-            if (buffer.length < offset + 8) return null;
             const amount = buffer.readBigUInt64LE(offset);
             offset += 8;
             
             // Read commission_l1 (8 bytes)
-            if (buffer.length < offset + 8) return null;
             offset += 8;
             
             // Read commission_l2 (8 bytes)
-            if (buffer.length < offset + 8) return null;
             offset += 8;
             
-            // Read team_funds (8 bytes) - 5% team funds
-            let teamFunds = BigInt(0);
-            if (buffer.length >= offset + 8) {
-                teamFunds = buffer.readBigUInt64LE(offset);
-            }
+            // Read team_funds (8 bytes)
+            const teamFunds = buffer.readBigUInt64LE(offset);
             offset += 8;
             
             // Read project_funds (8 bytes)
-            if (buffer.length < offset + 8) return null;
             offset += 8;
             
-            // Read ecosystem_funds (8 bytes) - 30% ecosystem funds
-            let ecosystemFunds = amount;
-            if (buffer.length >= offset + 8) {
-                ecosystemFunds = buffer.readBigUInt64LE(offset);
-            }
+            // Read ecosystem_funds (8 bytes)
+            const ecosystemFunds = buffer.readBigUInt64LE(offset);
             offset += 8;
             
             // Read l1_referrer (Option<Pubkey>)
             if (buffer.length < offset + 1) return null;
             const hasL1Referrer = buffer.readUInt8(offset) === 1;
             offset += 1;
-            if (hasL1Referrer && buffer.length >= offset + 32) {
+            if (hasL1Referrer) {
+                if (buffer.length < offset + 32) return null;
                 offset += 32;
             }
             
@@ -448,7 +552,8 @@ class BridgeRelayer {
             if (buffer.length < offset + 1) return null;
             const hasL2Referrer = buffer.readUInt8(offset) === 1;
             offset += 1;
-            if (hasL2Referrer && buffer.length >= offset + 32) {
+            if (hasL2Referrer) {
+                if (buffer.length < offset + 32) return null;
                 offset += 32;
             }
             
@@ -457,16 +562,28 @@ class BridgeRelayer {
             const productType = buffer.readUInt8(offset);
             offset += 1;
             
-            // Read recipient (20 bytes) - if present
+            // Read seth_recipient (20 bytes EVM address)
+            // Only if buffer has enough space (new format with seth_recipient)
             let recipientEth = null;
-            if (buffer.length >= offset + 20) {
+            const remainingBytes = buffer.length - offset;
+            
+            if (remainingBytes >= 20) {
+                // New format: 20 bytes seth_recipient + 8 bytes timestamp
                 const recipientEthBytes = buffer.slice(offset, offset + 20);
                 recipientEth = '0x' + recipientEthBytes.toString('hex');
+                // Don't increment offset, we're done
+            } else if (remainingBytes >= 8) {
+                // Old format: only 8 bytes timestamp, no seth_recipient
+                // Skip this event as it doesn't have the recipient
+                return null;
+            } else {
+                // Not enough data
+                return null;
             }
             
             return { 
-                amount: ecosystemFunds.toString(), // 30% ecosystem funds
-                teamFunds: teamFunds.toString(),   // 5% team funds
+                amount: ecosystemFunds.toString(),
+                teamFunds: teamFunds.toString(),
                 originalAmount: amount.toString(),
                 recipientEth,
                 productType
@@ -477,7 +594,76 @@ class BridgeRelayer {
     }
 
     /**
+     * Parse CrossChainMessage account from transaction
+     * This is a fallback when event parsing fails
+     */
+    async parseCrossChainMessageAccount(txDetails) {
+        try {
+            const programId = new PublicKey(CONFIG.solana.programId);
+            
+            // Find CrossChainMessage accounts created in this transaction
+            const accountKeys = txDetails.transaction?.message?.accountKeys || [];
+            
+            for (const account of accountKeys) {
+                const pubkey = account.pubkey || account;
+                if (typeof pubkey === 'string') continue;
+                
+                // Check if this is a PDA owned by our program
+                const accountInfo = await this.solanaConn.getAccountInfo(pubkey);
+                if (!accountInfo || !accountInfo.owner.equals(programId)) continue;
+                
+                const data = accountInfo.data;
+                
+                // CrossChainMessage discriminator from IDL: [13, 175, 177, 236, 30, 82, 224, 162]
+                const ccmDiscriminator = Buffer.from([13, 175, 177, 236, 30, 82, 224, 162]);
+                
+                if (data.length < 8 || !data.slice(0, 8).equals(ccmDiscriminator)) continue;
+                
+                console.log(`[Relayer] Found CrossChainMessage account: ${pubkey.toBase58()}`);
+                
+                // Parse CrossChainMessage (after 8-byte discriminator)
+                let offset = 8;
+                
+                // sender: Pubkey (32 bytes)
+                const sender = new PublicKey(data.slice(offset, offset + 32));
+                offset += 32;
+                
+                // original_amount: u64
+                const originalAmount = data.readBigUInt64LE(offset);
+                offset += 8;
+                
+                // amount: u64 (ecosystem funds 30%)
+                const amount = data.readBigUInt64LE(offset);
+                offset += 8;
+                
+                // team_funds: u64
+                const teamFunds = data.readBigUInt64LE(offset);
+                offset += 8;
+                
+                // seth_recipient: [u8; 20]
+                const recipientEth = '0x' + data.slice(offset, offset + 20).toString('hex');
+                offset += 20;
+                
+                console.log(`[Relayer] Parsed CrossChainMessage: amount=${amount}, teamFunds=${teamFunds}, recipient=${recipientEth}`);
+                
+                return {
+                    sender: sender.toBase58(),
+                    amount: amount.toString(),
+                    teamFunds: teamFunds.toString(),
+                    recipientEth
+                };
+            }
+            
+            return null;
+        } catch (error) {
+            console.error(`[Relayer] Error parsing CrossChainMessage account:`, error.message);
+            return null;
+        }
+    }
+
+    /**
      * Parse instruction data
+     * Note: This is a fallback for events, may not work with all instruction formats
      */
     parseInstructionData(txDetails) {
         try {
@@ -487,13 +673,23 @@ class BridgeRelayer {
                 if (ix.programId?.toString() === CONFIG.solana.programId) {
                     const data = Buffer.from(ix.data, 'base64');
                     
-                    if (data.length >= 8 + 8 + 20) {
+                    // process_revenue instruction: 8 bytes discriminator + 8 bytes amount + 1 byte product_type + 20 bytes recipient
+                    if (data.length >= 8 + 8 + 1 + 20) {
                         let offset = 8;
                         const amount = data.readBigUInt64LE(offset);
                         offset += 8;
                         
+                        // Skip product_type
+                        offset += 1;
+                        
                         const recipientEthBytes = data.slice(offset, offset + 20);
                         const recipientEth = '0x' + recipientEthBytes.toString('hex');
+                        
+                        // Validate amount is reasonable (max 1 billion USDC with 6 decimals = 10^15)
+                        if (amount > BigInt('1000000000000000')) {
+                            // Amount too large, likely not a valid process_revenue instruction
+                            continue;
+                        }
                         
                         return { amount: amount.toString(), recipientEth };
                     }
@@ -553,7 +749,8 @@ class BridgeRelayer {
             // - amountSETH: native SETH (for PoolB liquidity pairing)
             const ecosystemAmount = BigInt(amount || 0);
             const teamFundsAmount = BigInt(team_funds || 0);
-            const amountSETH = BigInt(CONFIG.seth.injectNativeWei);
+            // 动态计算配对的 SETH 数量，基于 PoolB 当前价格
+            const amountSETH = await this.calculateNativeAmount(ecosystemAmount);
             
             const inputData = this.encodeProcessCrossChainMessage(
                 solana_tx_sig_bytes32, 
@@ -570,8 +767,21 @@ class BridgeRelayer {
                 CONFIG.seth.privateKey,
                 CONFIG.seth.bridgeAddress.replace('0x', ''),
                 inputData,
-                { gasLimit: 200000, gasPrice: 1, amount: amountSETH.toString() }
+                { gasLimit: 1000000, gasPrice: 1, amount: amountSETH.toString() }
             );
+
+            // Check if Seth reports "already processed" → treat as success
+            const errMsg = result.success ? null : (result.error || 'Transaction failed');
+            if (errMsg && errMsg.toLowerCase().includes('already processed')) {
+                console.log(`[Relayer] SethBridge reports already processed for message ${id}, marking as completed`);
+                await this.db.markAsCompleted(id, {
+                    txHash: result.txHash || 'already-processed',
+                    blockNumber: 0
+                });
+                this.stats.totalProcessed++;
+                this.stats.lastProcessedAt = new Date();
+                return;
+            }
 
             if (result.success) {
                 console.log(`[Relayer] Seth tx sent: ${result.txHash}`);
@@ -586,6 +796,14 @@ class BridgeRelayer {
                 if (receipt?.status === 10) {
                     // kNotExists: transaction not found on node, treat as dropped, retry
                     throw new Error(`Seth tx not exists (status=10): ${result.txHash}`);
+                }
+                // Check if receipt shows "already processed" revert → treat as success
+                if (receipt?.revertReason && receipt.revertReason.toLowerCase().includes('already processed')) {
+                    console.log(`[Relayer] Receipt shows already processed for message ${id}, marking as completed`);
+                    await this.db.markAsCompleted(id, { txHash: result.txHash, blockNumber: receipt.nonce || 0 });
+                    this.stats.totalProcessed++;
+                    this.stats.lastProcessedAt = new Date();
+                    return;
                 }
                 
                 await this.db.markAsCompleted(id, {
@@ -671,29 +889,119 @@ class BridgeRelayer {
     isRetryableError(error) {
         const errorMessage = error.message?.toLowerCase() || '';
         
+        // Only truly permanent errors should be non-retryable
         const nonRetryablePatterns = [
             'already processed',
             'invalid recipient',
             'invalid amount',
-            'insufficient funds',
         ];
 
         for (const pattern of nonRetryablePatterns) {
             if (errorMessage.includes(pattern)) return false;
         }
 
-        const retryablePatterns = [
-            'network',
-            'timeout',
-            'connection',
-            'rate limit',
-        ];
-
-        for (const pattern of retryablePatterns) {
-            if (errorMessage.includes(pattern)) return true;
-        }
-
+        // Contract reverts should be retried (could be transient gas/state issues)
+        // Network/nonce errors are always retryable
         return true;
+    }
+
+    // ==================== Native Amount Calculation ====================
+
+    /**
+     * 从 PoolB 链上读取真实储备量，按当前价格比例计算配对的 SETH 数量
+     * 公式: amountSETH = amountSUSDC * reserveSETH / reservesUSDC
+     * 初始价格 0.01 sUSDC/SETH，后续由套利机器人维持
+     */
+    async calculateNativeAmount(amountSUSDC) {
+        const fallback = BigInt(CONFIG.seth.injectNativeWei);
+
+        try {
+            // 1. 获取 PoolB 地址（从 SethBridge.poolB() 读取）
+            const poolBAddress = await this.getPoolBAddress();
+            if (!poolBAddress) {
+                console.warn('[Relayer] PoolB address not available, using fallback');
+                return fallback;
+            }
+
+            // 2. 调用 PoolB.getPoolState() 获取储备量
+            const getPoolStateSelector = createKeccakHash('keccak256')
+                .update('getPoolState()')
+                .digest('hex')
+                .slice(0, 8);
+
+            // SethClient.queryContract(fromHex, contractAddress, inputData)
+            const response = await this.sethClient.queryContract(
+                this.relayerAddress.replace('0x', ''),
+                poolBAddress.replace('0x', ''),
+                '0x' + getPoolStateSelector
+            );
+
+            if (!response || typeof response !== 'string' || response.length < 194) {
+                console.warn('[Relayer] PoolB getPoolState failed, using fallback');
+                return fallback;
+            }
+
+            // 解码: 每个 uint256 占 64 hex 字符
+            const data = response.replace(/^0x/, '');
+            const reserveSETH = BigInt('0x' + data.slice(0, 64));
+            const reservesUSDC = BigInt('0x' + data.slice(64, 128));
+
+            if (reservesUSDC === 0n) {
+                console.warn('[Relayer] PoolB sUSDC reserve is 0, using fallback');
+                return fallback;
+            }
+
+            // 3. 按当前池子价格比例计算: amountSETH = amountSUSDC * reserveSETH / reservesUSDC
+            const amountSETH = (amountSUSDC * reserveSETH) / reservesUSDC;
+
+            const price = Number(reservesUSDC) / Number(reserveSETH);
+            console.log(`[Relayer] PoolB price: 1 SETH = ${price.toFixed(6)} sUSDC`);
+            console.log(`  Reserves: ${reserveSETH} SETH / ${reservesUSDC} sUSDC`);
+            console.log(`  Injecting: ${amountSUSDC} sUSDC raw (${Number(amountSUSDC) / 1e6} sUSDC)`);
+            console.log(`  Paired SETH: ${amountSETH.toString()} wei (${Number(amountSETH) / 1e18} SETH)`);
+
+            if (amountSETH === 0n) {
+                console.warn('[Relayer] Calculated SETH is 0, using fallback');
+                return fallback;
+            }
+
+            return amountSETH;
+        } catch (error) {
+            console.warn(`[Relayer] calculateNativeAmount error: ${error.message}, using fallback`);
+            return fallback;
+        }
+    }
+
+    /**
+     * 从 SethBridge 合约读取 PoolB 地址（缓存）
+     */
+    async getPoolBAddress() {
+        if (this._poolBAddress) return this._poolBAddress;
+
+        try {
+            const selector = createKeccakHash('keccak256')
+                .update('poolB()')
+                .digest('hex')
+                .slice(0, 8);
+
+            const response = await this.sethClient.queryContract(
+                this.relayerAddress.replace('0x', ''),
+                CONFIG.seth.bridgeAddress.replace('0x', ''),
+                '0x' + selector
+            );
+
+            if (response && typeof response === 'string') {
+                const data = response.replace(/^0x/, '');
+                if (data.length >= 64) {
+                    this._poolBAddress = '0x' + data.slice(24, 64);
+                    console.log(`[Relayer] PoolB address: ${this._poolBAddress}`);
+                    return this._poolBAddress;
+                }
+            }
+        } catch (error) {
+            console.warn(`[Relayer] Failed to get PoolB address: ${error.message}`);
+        }
+        return null;
     }
 
     // ==================== Retry Scheduler ====================

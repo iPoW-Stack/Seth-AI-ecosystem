@@ -38,7 +38,7 @@ const CONFIG = {
         // Default 1 wei is for testing only; configure a reasonable value for production
         injectNativeWei: process.env.BSC_INJECT_NATIVE_WEI || '1',
         // Gas Configuration
-        gasLimit: parseInt(process.env.BSC_GAS_LIMIT) || 300000,
+        gasLimit: parseInt(process.env.BSC_GAS_LIMIT) || 1000000,
         gasPrice: process.env.BSC_GAS_PRICE || null, // null means auto-fetch
     },
     // Database Configuration
@@ -294,28 +294,35 @@ class BscBridgeRelayer {
             const status = await this.db.getRelayerStatus();
             const programId = new PublicKey(CONFIG.solana.programId);
             
-            // Get the last processed signature to only fetch new transactions
+            // Get the last processed signature for API cursor
             const until = status?.last_processed_signature;
+            // Get the last processed slot for additional filtering
+            const lastProcessedSlot = status?.last_processed_slot || 0;
             
             const signatures = await this.solanaConn.getSignaturesForAddress(
                 programId,
-                { limit: 5, until: until || undefined },
+                { limit: 10, until: until || undefined },
                 CONFIG.solana.commitment
             );
 
             // Process oldest first (reverse order)
             const sortedSigs = signatures.reverse();
             
-            // Update last processed signature to the newest one BEFORE processing
-            // This prevents re-processing on next poll cycle
-            if (sortedSigs.length > 0) {
-                const newestSig = sortedSigs[sortedSigs.length - 1].signature;
-                await this.db.updateRelayerStatus({
-                    lastProcessedSignature: newestSig
-                });
-            }
+            // Filter out signatures at or before lastProcessedSlot (slot-based guard)
+            const newSigs = sortedSigs.filter(sig => (sig.slot || 0) > lastProcessedSlot);
 
-            for (const sig of sortedSigs) {
+            if (newSigs.length === 0) return;
+
+            // Update cursor to the newest signature BEFORE processing
+            // This prevents re-processing on next poll cycle
+            const newestSig = newSigs[newSigs.length - 1].signature;
+            const newestSlot = newSigs[newSigs.length - 1].slot;
+            await this.db.updateRelayerStatus({
+                lastProcessedSignature: newestSig,
+                lastProcessedSlot: newestSlot
+            });
+
+            for (const sig of newSigs) {
                 if (sig.err) continue;
                 
                 const alreadyProcessed = await this.db.isProcessed(sig.signature);
@@ -329,8 +336,8 @@ class BscBridgeRelayer {
 
                 const savedMessage = await this.db.insertMessage(messageData);
                 if (savedMessage) {
-                    console.log(`[BscRelayer] Polled new message: ${sig.signature}`);
-                    await this.db.logOperation(savedMessage.id, 'detect', { source: 'poll' });
+                    console.log(`[BscRelayer] Polled new message: ${sig.signature} (slot: ${sig.slot})`);
+                    await this.db.logOperation(savedMessage.id, 'detect', { source: 'poll', slot: sig.slot });
                     await this.processMessage(savedMessage);
                 }
             }
@@ -374,8 +381,10 @@ class BscBridgeRelayer {
             const allDiscriminators = this.getAllEventDiscriminators();
             
             for (const log of logMessages) {
-                if (log.includes('Program log:')) {
-                    const base64Data = log.split('Program log:')[1]?.trim();
+                // Anchor events (emit!) are serialized as base64 in "Program data:" log lines
+                // NOT in "Program log:" which contains text messages (msg!())
+                if (log.includes('Program data:')) {
+                    const base64Data = log.split('Program data:')[1]?.trim();
                     if (base64Data) {
                         try {
                             const debugBuffer = Buffer.from(base64Data, 'base64');
@@ -434,8 +443,9 @@ class BscBridgeRelayer {
                 }
             }
 
-            if (!amount || !recipientEth) {
-                // Not a RevenueProcessed transaction or missing recipient data
+            // amount is required, recipientEth is optional (not needed for PoolB injection)
+            if (!amount) {
+                // Not a RevenueProcessed transaction
                 return null;
             }
 
@@ -450,7 +460,7 @@ class BscBridgeRelayer {
                 solanaTxSigBytes32,
                 amount: amount.toString(),
                 teamFunds: teamFunds ? teamFunds.toString() : '0',
-                recipientEth,
+                recipientEth: recipientEth || '0x0000000000000000000000000000000000000000',
                 senderSolana: senderSolana || 'unknown',
                 solanaBlockTime: txDetails.blockTime
             };
@@ -772,7 +782,8 @@ class BscBridgeRelayer {
             // - amountBNB: native BNB (for PoolB liquidity pairing)
             const ecosystemAmount = BigInt(amount || 0);
             const teamFundsAmount = BigInt(team_funds || 0);
-            const amountBNB = BigInt(CONFIG.bsc.injectNativeWei);
+            // 动态计算配对的 BNB 数量，基于 PoolB 当前价格
+            const amountBNB = await this.calculateNativeAmount(ecosystemAmount);
             
             const inputData = this.bscClient.encodeProcessCrossChainMessage(
                 solana_tx_sig_bytes32, 
@@ -858,34 +869,115 @@ class BscBridgeRelayer {
     isRetryableError(error) {
         const errorMessage = error.message?.toLowerCase() || '';
         
+        // Only truly permanent errors should be non-retryable
         const nonRetryablePatterns = [
             'already processed',
             'invalid recipient',
             'invalid amount',
-            'insufficient funds',
-            'revert',
-            'execution reverted',
         ];
 
         for (const pattern of nonRetryablePatterns) {
             if (errorMessage.includes(pattern)) return false;
         }
 
-        const retryablePatterns = [
-            'network',
-            'timeout',
-            'connection',
-            'rate limit',
-            'nonce too low',
-            'replacement transaction underpriced',
-            'insufficient funds for gas',
-        ];
-
-        for (const pattern of retryablePatterns) {
-            if (errorMessage.includes(pattern)) return true;
-        }
-
+        // Contract reverts should be retried (could be transient gas/state issues)
+        // Network/nonce errors are always retryable
         return true;
+    }
+
+    // ==================== Native Amount Calculation ====================
+
+    /**
+     * 从 PoolB 链上读取真实储备量，按当前价格比例计算配对的 BNB 数量
+     * 公式: amountBNB = amountSUSDC * reserveSETH / reservesUSDC
+     * 这样添加流动性后池子价格保持不变
+     * 初始价格 0.01 sUSDC/BNB，后续由套利机器人维持
+     */
+    async calculateNativeAmount(amountSUSDC) {
+        const fallback = BigInt(CONFIG.bsc.injectNativeWei);
+
+        try {
+            // 1. 获取 PoolB 地址（从 SethBridge.poolB() 读取）
+            const poolBAddress = await this.getPoolBAddress();
+            if (!poolBAddress) {
+                console.warn('[BscRelayer] PoolB address not available, using fallback');
+                return fallback;
+            }
+
+            // 2. 调用 PoolB.getPoolState() 获取储备量
+            // 返回 7 个 uint256: reserveSETH, reservesUSDC, price, totalTx, totalVolSETH, totalVolSUSDC, nativeBalance
+            const getPoolStateSelector = createKeccakHash('keccak256')
+                .update('getPoolState()')
+                .digest('hex')
+                .slice(0, 8);
+
+            const result = await this.bscClient.callContract(poolBAddress, '0x' + getPoolStateSelector);
+
+            if (!result.success || !result.data || result.data.length < 194) {
+                console.warn('[BscRelayer] PoolB getPoolState failed, using fallback');
+                return fallback;
+            }
+
+            // 解码: 去掉 0x 前缀，每个 uint256 占 64 hex 字符
+            const data = result.data.replace(/^0x/, '');
+            const reserveSETH = BigInt('0x' + data.slice(0, 64));
+            const reservesUSDC = BigInt('0x' + data.slice(64, 128));
+
+            if (reservesUSDC === 0n) {
+                console.warn('[BscRelayer] PoolB sUSDC reserve is 0, using fallback');
+                return fallback;
+            }
+
+            // 3. 按当前池子价格比例计算: amountBNB = amountSUSDC * reserveSETH / reservesUSDC
+            const amountBNB = (amountSUSDC * reserveSETH) / reservesUSDC;
+
+            const price = Number(reservesUSDC) / Number(reserveSETH);
+            console.log(`[BscRelayer] PoolB price: 1 BNB = ${price.toFixed(6)} sUSDC`);
+            console.log(`  Reserves: ${reserveSETH.toString()} BNB / ${reservesUSDC.toString()} sUSDC`);
+            console.log(`  Injecting: ${amountSUSDC} sUSDC raw (${Number(amountSUSDC) / 1e6} sUSDC)`);
+            console.log(`  Paired BNB: ${amountBNB.toString()} wei (${Number(amountBNB) / 1e18} BNB)`);
+
+            if (amountBNB === 0n) {
+                console.warn('[BscRelayer] Calculated BNB is 0, using fallback');
+                return fallback;
+            }
+
+            return amountBNB;
+        } catch (error) {
+            console.warn(`[BscRelayer] calculateNativeAmount error: ${error.message}, using fallback`);
+            return fallback;
+        }
+    }
+
+    /**
+     * 从 SethBridge 合约读取 PoolB 地址（缓存）
+     */
+    async getPoolBAddress() {
+        if (this._poolBAddress) return this._poolBAddress;
+
+        try {
+            // poolB() 是 public 字段，selector = keccak256("poolB()")[:4]
+            const selector = createKeccakHash('keccak256')
+                .update('poolB()')
+                .digest('hex')
+                .slice(0, 8);
+
+            const result = await this.bscClient.callContract(
+                CONFIG.bsc.bridgeAddress,
+                '0x' + selector
+            );
+
+            if (result.success && result.data && result.data.length >= 66) {
+                // address 是 32 字节中的最后 20 字节
+                const data = result.data.replace(/^0x/, '');
+                this._poolBAddress = '0x' + data.slice(24, 64);
+                console.log(`[BscRelayer] PoolB address: ${this._poolBAddress}`);
+                return this._poolBAddress;
+            }
+        } catch (error) {
+            console.warn(`[BscRelayer] Failed to get PoolB address: ${error.message}`);
+        }
+        return null;
     }
 
     // ==================== Retry Scheduler ====================

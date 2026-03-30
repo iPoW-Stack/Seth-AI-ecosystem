@@ -89,6 +89,21 @@ pub struct UserInfo {
     pub created_at: i64,
 }
 
+// ==================== sUSDC Vault Config ====================
+
+/// sUSDC vault configuration (separate PDA to avoid Config migration)
+/// Created via setup_susdc_vault instruction
+#[account]
+#[derive(InitSpace)]
+pub struct SusdcConfig {
+    /// sUSDC mint address
+    pub susdc_mint: Pubkey,
+    /// Vault sUSDC token account (holds cross-chain sUSDC collateral)
+    pub vault_susdc_token_account: Pubkey,
+    /// PDA bump
+    pub bump: u8,
+}
+
 // ==================== Cross-Chain Message ====================
 
 /// Cross-chain message status (Solana -> Seth)

@@ -25,16 +25,24 @@ const DIRM_POOL_ABI = {};
 
 class PriceService {
     constructor() {
-        // Seth provider
-        this.sethProvider = new ethers.JsonRpcProvider(process.env.SETH_RPC_URL);
-        this.poolBContract = new ethers.Contract(
-            process.env.POOL_B_ADDRESS,
-            POOL_B_ABI,
-            this.sethProvider
-        );
+        // Seth provider (use SETH_RPC_URL or BSC_RPC_URL as fallback)
+        const sethRpc = process.env.SETH_RPC_URL || process.env.BSC_RPC_URL;
+        if (sethRpc) {
+            this.sethProvider = new ethers.JsonRpcProvider(sethRpc);
+            this.poolBContract = new ethers.Contract(
+                process.env.POOL_B_ADDRESS || process.env.POOL_B_CONTRACT || ethers.ZeroAddress,
+                POOL_B_ABI,
+                this.sethProvider
+            );
+        } else {
+            this.sethProvider = null;
+            this.poolBContract = null;
+            console.warn('[PriceService] No Seth RPC URL configured, price queries will use fallbacks');
+        }
         
         // Solana connection
-        this.solanaConnection = new Connection(process.env.SOLANA_RPC_URL, 'confirmed');
+        const solanaRpc = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
+        this.solanaConnection = new Connection(solanaRpc, 'confirmed');
         
         // Cache
         this.priceCache = {
@@ -126,21 +134,20 @@ class PriceService {
      * Returns: price in 18 decimals (how many SETH for 1 sUSDC)
      */
     async getSethPerSusdcPrice() {
+        if (!this.poolBContract) {
+            throw new Error('PoolB contract not configured');
+        }
         try {
             const price = await this.poolBContract.getPrice();
-            // Price is usually in 18 decimals
             return BigInt(price.toString());
         } catch (error) {
-            console.error('[PriceService] Error getting SETH price:', error);
-            
-            // Fallback: calculate from reserves
+            console.error('[PriceService] Error getting SETH price:', error.message);
             try {
                 const { reserveSETH, reserveSUSDC } = await this.poolBContract.getReserves();
-                // Price = reserveSETH / reserveSUSDC
                 const price = (BigInt(reserveSETH.toString()) * BigInt(1e18)) / BigInt(reserveSUSDC.toString());
                 return price;
             } catch (e) {
-                console.error('[PriceService] Fallback also failed:', e);
+                console.error('[PriceService] Fallback also failed:', e.message);
                 throw error;
             }
         }
@@ -152,8 +159,12 @@ class PriceService {
      */
     async getUsdcPerSusdcPrice() {
         try {
+            // Check if DIRM program is configured
+            if (!process.env.DIRM_PROGRAM_ID) {
+                console.warn('[PriceService] DIRM_PROGRAM_ID not configured, using 1:1 USDC/sUSDC fallback');
+                return BigInt(1e18);
+            }
             // Call DIRM program to get pool reserves
-            // This is a simplified implementation
             const dirmProgramId = new PublicKey(process.env.DIRM_PROGRAM_ID);
             const poolPDA = await this.getDirmPoolPDA();
             
@@ -341,6 +352,9 @@ class PriceService {
     }
     
     async getSethGasPrice() {
+        if (!this.sethProvider) {
+            return BigInt('1000000000');
+        }
         try {
             const gasPrice = await this.sethProvider.getFeeData();
             return BigInt(gasPrice.gasPrice?.toString() || '1000000000'); // Default 1 gwei

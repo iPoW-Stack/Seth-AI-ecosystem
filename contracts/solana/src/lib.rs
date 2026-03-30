@@ -64,6 +64,11 @@ pub mod seth_bridge {
         handle_close_user_info(ctx)
     }
 
+    /// Setup sUSDC vault for cross-chain revenue processing
+    pub fn setup_susdc_vault(ctx: Context<SetupSusdcVault>) -> Result<()> {
+        handle_setup_susdc_vault(ctx)
+    }
+
     // ==================== Revenue Instructions ====================
 
     /// Process revenue and execute 15-50-35 distribution
@@ -87,6 +92,20 @@ pub mod seth_bridge {
     /// User withdraws commission
     pub fn withdraw_commission(ctx: Context<WithdrawCommission>) -> Result<()> {
         handle_withdraw_commission(ctx)
+    }
+
+    /// Process revenue with pre-swapped sUSDC for cross-chain portion
+    /// Used in combination with DIRM swap in a single atomic transaction:
+    ///   Instruction 1: DIRM swap (35% USDC → sUSDC)
+    ///   Instruction 2: process_revenue_with_susdc (this instruction)
+    pub fn process_revenue_with_susdc(
+        ctx: Context<ProcessRevenueWithSusdc>,
+        original_amount: u64,
+        susdc_amount: u64,
+        product_type: u8,
+        seth_recipient: [u8; 20],
+    ) -> Result<()> {
+        handle_process_revenue_with_susdc(ctx, original_amount, susdc_amount, product_type, seth_recipient)
     }
 
     /// Manually trigger monthly settlement

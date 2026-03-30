@@ -38,7 +38,7 @@ const CONFIG = {
         privateKey: process.env.RELAYER_PRIVATE_KEY,
         proxy: process.env.BSC_HTTP_PROXY || process.env.BSC_PROXY || null,
         injectNativeWei: process.env.BSC_INJECT_NATIVE_WEI || '1',
-        gasLimit: parseInt(process.env.BSC_GAS_LIMIT) || 300000,
+        gasLimit: parseInt(process.env.BSC_GAS_LIMIT) || 1000000,
         gasPrice: process.env.BSC_GAS_PRICE || null,
     },
     database: {
@@ -449,11 +449,12 @@ class HighConcurrencyBscRelayer {
             if (logs.err) return;
 
             const logString = logs.logs.join(' ');
-            if (!logString.includes('CrossChainLock') && !logString.includes('Program data:')) {
+            if (!logString.includes('Program data:')) {
                 return;
             }
 
-            const txSignature = ctx.signature;
+            // onLogs callback: logs = { err, logs, signature }
+            const txSignature = logs.signature;
             
             // 快速检查是否已处理
             const alreadyProcessed = await this.db.isProcessed(txSignature);
@@ -550,8 +551,9 @@ class HighConcurrencyBscRelayer {
 
             const logMessages = txDetails.meta.logMessages || [];
             for (const log of logMessages) {
-                if (log.includes('Program log:')) {
-                    const base64Data = log.split('Program log:')[1]?.trim();
+                // Anchor events (emit!) are in "Program data:" lines, NOT "Program log:"
+                if (log.includes('Program data:')) {
+                    const base64Data = log.split('Program data:')[1]?.trim();
                     if (base64Data) {
                         try {
                             const eventData = this.parseAnchorEvent(base64Data);
@@ -577,7 +579,7 @@ class HighConcurrencyBscRelayer {
                     txDetails.transaction.message.accountKeys[0].toString();
             }
 
-            if (!amount || !recipientEth) {
+            if (!amount) {
                 const parsedData = this.parseInstructionData(txDetails);
                 if (parsedData) {
                     amount = parsedData.amount || amount;
@@ -586,7 +588,8 @@ class HighConcurrencyBscRelayer {
                 }
             }
 
-            if (!amount || !recipientEth) return null;
+            // amount is required, recipientEth is optional (not needed for PoolB injection)
+            if (!amount) return null;
 
             const sigBytes = bs58.decode(txSignature);
             const solanaTxSigBytes32 = '0x' + createKeccakHash('keccak256')
@@ -687,7 +690,11 @@ class HighConcurrencyBscRelayer {
             console.log(`[Worker${worker.id}] Processing: ${message.solana_tx_sig}`);
 
             const amountFromSolana = BigInt(message.amount);
-            const amountBNB = BigInt(CONFIG.bsc.injectNativeWei);
+
+            // 动态计算配对的 BNB 数量
+            // 查询 PoolB 当前价格，计算需要配对的 BNB
+            const amountBNB = await this.calculateNativeAmount(amountFromSolana);
+
             const inputData = this.bscClient.encodeInjectEcosystemFunds(
                 message.solana_tx_sig_bytes32,
                 amountFromSolana,
@@ -770,26 +777,17 @@ class HighConcurrencyBscRelayer {
     isRetryableError(error) {
         const msg = error.message?.toLowerCase() || '';
 
+        // Only truly permanent errors should be non-retryable
         const nonRetryable = [
             'already processed',
             'invalid recipient',
             'invalid amount',
-            'insufficient funds',
-            'revert',
         ];
 
         if (nonRetryable.some(p => msg.includes(p))) return false;
 
-        const retryable = [
-            'network',
-            'timeout',
-            'connection',
-            'rate limit',
-            'nonce',
-            'underpriced',
-        ];
-
-        return retryable.some(p => msg.includes(p)) || true;
+        // Contract reverts should be retried (could be transient gas/state issues)
+        return true;
     }
 
     // ==================== 重试调度器 ====================
@@ -931,6 +929,85 @@ class HighConcurrencyBscRelayer {
         console.log(`  Queue: ${this.messageQueue.length} pending, ${this.messageQueue.processingCount} processing`);
         console.log(`  Workers: ${this.workers.filter(w => w.busy).length}/${this.workers.length} busy`);
         console.log('[RelayerV2] =====================');
+    }
+
+    // ==================== Native Amount Calculation ====================
+
+    /**
+     * 从 PoolB 链上读取真实储备量，按当前价格比例计算配对的 BNB 数量
+     * 公式: amountBNB = amountSUSDC * reserveSETH / reservesUSDC
+     * 初始价格 0.01 sUSDC/BNB，后续由套利机器人维持
+     */
+    async calculateNativeAmount(amountSUSDC) {
+        const fallback = BigInt(CONFIG.bsc.injectNativeWei);
+
+        try {
+            const poolBAddress = await this.getPoolBAddress();
+            if (!poolBAddress) {
+                console.warn('[RelayerV2] PoolB address not available, using fallback');
+                return fallback;
+            }
+
+            const getPoolStateSelector = createKeccakHash('keccak256')
+                .update('getPoolState()')
+                .digest('hex')
+                .slice(0, 8);
+
+            const result = await this.bscClient.callContract(poolBAddress, '0x' + getPoolStateSelector);
+
+            if (!result.success || !result.data || result.data.length < 194) {
+                console.warn('[RelayerV2] PoolB getPoolState failed, using fallback');
+                return fallback;
+            }
+
+            const data = result.data.replace(/^0x/, '');
+            const reserveSETH = BigInt('0x' + data.slice(0, 64));
+            const reservesUSDC = BigInt('0x' + data.slice(64, 128));
+
+            if (reservesUSDC === 0n) {
+                console.warn('[RelayerV2] PoolB sUSDC reserve is 0, using fallback');
+                return fallback;
+            }
+
+            const amountBNB = (amountSUSDC * reserveSETH) / reservesUSDC;
+
+            const price = Number(reservesUSDC) / Number(reserveSETH);
+            console.log(`[RelayerV2] PoolB price: 1 BNB = ${price.toFixed(6)} sUSDC`);
+            console.log(`  Reserves: ${reserveSETH} BNB / ${reservesUSDC} sUSDC`);
+            console.log(`  Injecting: ${amountSUSDC} sUSDC, Paired BNB: ${amountBNB} wei`);
+
+            if (amountBNB === 0n) return fallback;
+            return amountBNB;
+        } catch (error) {
+            console.warn(`[RelayerV2] calculateNativeAmount error: ${error.message}, using fallback`);
+            return fallback;
+        }
+    }
+
+    async getPoolBAddress() {
+        if (this._poolBAddress) return this._poolBAddress;
+
+        try {
+            const selector = createKeccakHash('keccak256')
+                .update('poolB()')
+                .digest('hex')
+                .slice(0, 8);
+
+            const result = await this.bscClient.callContract(
+                CONFIG.bsc.bridgeAddress,
+                '0x' + selector
+            );
+
+            if (result.success && result.data && result.data.length >= 66) {
+                const data = result.data.replace(/^0x/, '');
+                this._poolBAddress = '0x' + data.slice(24, 64);
+                console.log(`[RelayerV2] PoolB address: ${this._poolBAddress}`);
+                return this._poolBAddress;
+            }
+        } catch (error) {
+            console.warn(`[RelayerV2] Failed to get PoolB address: ${error.message}`);
+        }
+        return null;
     }
 
     // ==================== 工具方法 ====================

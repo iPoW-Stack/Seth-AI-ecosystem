@@ -10,7 +10,7 @@ seth_bridge = "2PpwtfR2QHfR7qGhH8eaeiTiJac8LfdSQFdR6FJf6aF9"
 dirm = "3JXLqa4oqswBh4knQrVUJh1iyxjTufF5kijDiSsQZSx8"
 
 [programs.devnet]
-seth_bridge = "2PpwtfR2QHfR7qGhH8eaeiTiJac8LfdSQFdR6FJf6aF9"
+seth_bridge = "125eQs1s3SNxd5KFRpAJ6JvtVpD4tRYw6fWKomibQ8tc"
 dirm = "3JXLqa4oqswBh4knQrVUJh1iyxjTufF5kijDiSsQZSx8"
 
 [scripts]

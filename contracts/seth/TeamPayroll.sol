@@ -130,6 +130,14 @@ contract TeamPayroll {
         require(msg.sender == trustedRelayer, "TeamPayroll: Not trusted relayer");
         _;
     }
+    
+    modifier onlyRelayerOrBridge() {
+        require(
+            msg.sender == trustedRelayer || msg.sender == sethBridge,
+            "TeamPayroll: Not relayer or bridge"
+        );
+        _;
+    }
 
     // ==================== Constructor ====================
 
@@ -195,7 +203,7 @@ contract TeamPayroll {
     function receiveTeamFunds(
         bytes32 solanaTxSig,
         uint256 amountSUSDC
-    ) external onlyRelayer {
+    ) external onlyRelayerOrBridge {
         require(amountSUSDC > 0, "TeamPayroll: Zero amount");
         require(!processedMessages[solanaTxSig], "TeamPayroll: Already processed");
         

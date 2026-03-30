@@ -1,299 +1,190 @@
 # Seth-Solana Cross-Chain Bridge Relayer
 
-A bidirectional cross-chain relayer service connecting **Seth Chain** (EVM) and **Solana**, enabling seamless asset transfers between the two networks.
+基于 TrustRelayer 安全模型的 Seth-Solana 跨链桥 Relayer 实现。
 
-## Important Notes
+## 重要说明
 
-**SETH is the native token of Seth Chain (similar to ETH), NOT an ERC20 token.**
-- PoolB uses native SETH for trading
-- Treasury contract receives and sends native SETH via `msg.value`
-- Users can buy/sell native SETH through PoolB
+**SETH 是 Seth 链的原生代币（类似 ETH），不是 ERC20 代币。**
 
-## Architecture Overview
+- 池B (PoolB) 使用原生 SETH 进行交易
+- Treasury 合约通过 `msg.value` 接收和发送原生 SETH
+- 用户可以通过 PoolB 买卖原生 SETH
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        Cross-Chain Bridge Architecture                       │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│    Solana (Anchor)                              Seth Chain (EVM)             │
-│   ┌────────────────┐                          ┌────────────────┐            │
-│   │ Seth Bridge    │                          │ PoolB          │            │
-│   │ ├─ process_    │     Solana → Seth       │ ├─ buySETH()   │            │
-│   │ │  revenue()   │◄────────────────────────┤ ├─ sellSETH()  │            │
-│   │ ├─ DIRM Swap   │                         │ └─ sUSDC       │            │
-│   │ └─ sUSDC (SPL) │     Seth → Solana       │                │            │
-│   │                │────────────────────────► │                │            │
-│   └───────┬────────┘                          └────────────────┘            │
-│           │                                                                  │
-│           │ Events                                                           │
-│           ▼                                                                  │
-│   ┌────────────────┐                                                         │
-│   │    Relayer     │                                                         │
-│   │   (Node.js)    │                                                         │
-│   ├────────────────┤                                                         │
-│   │ • Event Listen │                                                         │
-│   │ • Price Service│                                                         │
-│   │ • Fee Calc     │                                                         │
-│   │ • PostgreSQL   │                                                         │
-│   └────────────────┘                                                         │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+## 分账流程 (15-50-35)
 
-## Bidirectional Cross-Chain Flows
+**重要：分账逻辑在 Solana 链上完成**
 
-### 1. Solana → Seth (Buy SETH)
-
-When a user pays USDC on Solana to buy SETH:
+当用户在 Solana 链上支付 USDC 时：
 
 ```
-User Payment (USDC) on Solana
-         │
-         ▼
-┌─────────────────────────────────────────────┐
-│         Solana: process_revenue()           │
-│                                             │
-│  Revenue Distribution (15-50-35):           │
-│  ├── 10% → L1 Referrer Commission           │
-│  ├── 5%  → L2 Referrer Commission           │
-│  ├── 5%  → Team Wallet                      │
-│  ├── 45% → Project Wallet                   │
-│  └── 35% → Cross-chain to Seth (Ecosystem)  │
-└─────────────────────────────────────────────┘
-         │
-         │ Relayer detects RevenueProcessed event
-         ▼
-┌─────────────────────────────────────────────┐
-│         Seth: injectEcosystemFunds()        │
-│                                             │
-│  • Mint sUSDC to user                       │
-│  • Inject liquidity into PoolB              │
-└─────────────────────────────────────────────┘
+总金额 (100%)
+    │
+    ├── 15% 推广佣金 (实时分发)
+    │   ├── 10% → L1 推荐人
+    │   └── 5%  → L2 推荐人
+    │
+    ├── 50% 运营储备 (月底清算)
+    │   ├── 5%  → 团队激励钱包
+    │   └── 45% → 项目方多签钱包
+    │
+    └── 35% 生态资金 (跨链到 Seth)
+        └── → Relayer → SethBridge.injectEcosystemFunds() → PoolB
 ```
 
-### 2. Seth → Solana (Sell SETH)
+**35% 生态资金直接注入 PoolB：**
+1. Relayer 监听 Solana 的 `RevenueProcessed` 事件
+2. 计算需要的 SETH 数量（基于 PoolB 当前价格）
+3. 调用 `SethBridge.injectEcosystemFunds()` 注入流动性
+4. PoolB 获得 sUSDC + SETH 流动性，支撑 SETH 价格
 
-When a user sells SETH on Seth to receive sUSDC on Solana:
+### Solana 链职责
+- 收入归集
+- 15-50-35 分账计算
+- L1/L2 佣金实时分发
+- 月底清算拨付
+- 触发 35% 跨链
 
-```
-User calls sellSETH(solanaRecipient) on PoolB
-         │
-         ▼
-┌─────────────────────────────────────────────┐
-│         Seth: PoolB.sellSETH()              │
-│                                             │
-│  • User sends native SETH                   │
-│  • Calculate sUSDC output amount            │
-│  • Burn sUSDC from user                     │
-│  • Emit SwapExecuted(isBuySETH=false)       │
-└─────────────────────────────────────────────┘
-         │
-         │ Relayer detects SwapExecuted event
-         ▼
-┌─────────────────────────────────────────────┐
-│    Solana: process_seth_withdrawal()        │
-│                                             │
-│  • Verify withdrawal message (replay prot.) │
-│  • Calculate cross-chain fee                │
-│  • Mint (amount - fee) sUSDC to user        │
-│  • Mint fee sUSDC to relayer (gas subsidy)  │
-└─────────────────────────────────────────────┘
-```
+### Seth 链职责
+- 接收 35% 生态资金
+- 铸造 sUSDC
+- 注入池B支撑 SETH 价格
 
-## Cross-Chain Fee Calculation
-
-When processing Seth → Solana withdrawals, a cross-chain fee is charged to cover Solana gas costs:
+## 架构概览
 
 ```
-Exchange Rate Chain:
-┌─────────────────────────────────────────────────────────────────┐
-│  SOL/SETH = (SOL/USDC) × (USDC/sUSDC) ÷ (SETH/sUSDC)            │
-│                                                                 │
-│  • SOL/USDC   → CoinGecko / Jupiter Price API                  │
-│  • USDC/sUSDC → DIRM Pool Reserves (Solana)                    │
-│  • SETH/sUSDC → PoolB Reserves (Seth)                          │
-└─────────────────────────────────────────────────────────────────┘
-
-Fee Formula:
-┌─────────────────────────────────────────────────────────────────┐
-│  Fee = (Estimated Gas Units × Gas Price) × (SETH/SOL Rate)      │
-│        × (sUSDC/SETH Rate) × (1 + Markup%)                      │
-│                                                                 │
-│  Example:                                                       │
-│  • Gas: 200,000 compute units × 0.000005 SOL = 0.001 SOL        │
-│  • SOL/SETH rate: 0.067 SETH per SOL                           │
-│  • sUSDC/SETH rate: 2500 sUSDC per SETH                        │
-│  • Fee = 0.001 × 0.067 × 2500 × 1.10 = 0.18 sUSDC              │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
+│    Solana       │      │    Relayer      │      │     Seth        │
+│  Bridge Program │─────▶│   (Node.js)     │─────▶│  Bridge Contract│
+│                 │      │                 │      │                 │
+│  - Lock Event   │      │  - Event Listen │      │  - ExecuteUnlock│
+│  - SPL Token    │      │  - PostgreSQL   │      │  - Mint sUSDC   │
+└─────────────────┘      │  - Retry Logic  │      └─────────────────┘
+                         └─────────────────┘
 ```
 
-## User Address Mapping
+## 功能特性
 
-For Seth → Solana withdrawals, users need to register their Solana address:
+- **事件监听**: 实时监听 Solana Bridge 程序的 CrossChainLock 事件
+- **消息持久化**: 使用 PostgreSQL 存储跨链消息，支持断点续传
+- **失败重发**: 自动重试失败的消息，支持指数退避策略
+- **状态追踪**: 完整的消息状态管理和操作日志
+- **优雅关闭**: 支持 SIGINT/SIGTERM 信号处理，确保消息不丢失
 
-```javascript
-// Register Solana address for Seth user
-await registerAddressMapping({
-    sethUser: '0x...',           // Seth address
-    solanaAddress: '...',        // Solana public key
-    signature: '...'             // Proof of ownership
-});
-```
-
-## Directory Structure
+## 目录结构
 
 ```
 relayer/
-├── relayer.js                    # Solana → Seth relayer
-├── seth-withdrawal-relayer.js    # Seth → Solana relayer
-├── unified-relayer.js            # Unified bidirectional relayer
-├── price-service.js              # Cross-chain price oracle
-├── sethClient.js                 # Seth RPC client
-├── register-address.js           # User address mapping utility
-│
 ├── db/
-│   ├── init.sql                  # Database schema
-│   ├── migrate-add-fields.sql    # Schema migrations
-│   ├── migrate-add-seth-withdrawal.sql
-│   ├── migrate-add-user-address-mapping.sql
-│   └── database.js               # Database operations
-│
-└── test-*.js                     # Test scripts
+│   ├── init.sql       # 数据库初始化脚本
+│   └── database.js    # 数据库操作类
+├── relayer.js         # Relayer 主程序
+├── package.json       # 项目依赖
+├── .env.example       # 环境变量示例
+└── README.md          # 本文档
 ```
 
-## Database Schema
+## 快速开始
 
-### cross_chain_messages (Solana → Seth)
-
-| Column | Type | Description |
-|--------|------|-------------|
-| id | SERIAL | Primary key |
-| solana_tx_sig | VARCHAR(88) | Solana transaction signature |
-| amount | BIGINT | Cross-chain amount |
-| sender_solana | VARCHAR(44) | Sender Solana address |
-| recipient_seth | VARCHAR(42) | Recipient Seth address |
-| status | VARCHAR(20) | pending/processing/completed/failed |
-| seth_tx_hash | VARCHAR(66) | Seth transaction hash |
-| retry_count | INTEGER | Retry attempts |
-| created_at | TIMESTAMP | Creation time |
-
-### seth_withdrawal_messages (Seth → Solana)
-
-| Column | Type | Description |
-|--------|------|-------------|
-| id | SERIAL | Primary key |
-| seth_tx_hash | VARCHAR(66) | Seth transaction hash |
-| seth_user | VARCHAR(42) | Seth user address |
-| solana_recipient | VARCHAR(44) | Solana recipient address |
-| susdc_amount | BIGINT | sUSDC amount |
-| cross_chain_fee | BIGINT | Fee charged |
-| status | VARCHAR(20) | pending/processing/completed/failed |
-| solana_tx_sig | VARCHAR(88) | Solana transaction signature |
-
-### user_address_mapping (Address Mapping)
-
-| Column | Type | Description |
-|--------|------|-------------|
-| id | SERIAL | Primary key |
-| seth_address | VARCHAR(42) | Seth address |
-| solana_address | VARCHAR(44) | Solana address |
-| created_at | TIMESTAMP | Registration time |
-
-### relayer_status (Relayer State)
-
-| Column | Type | Description |
-|--------|------|-------------|
-| id | SERIAL | Primary key |
-| last_solana_slot | BIGINT | Last processed Solana slot |
-| last_seth_block | BIGINT | Last processed Seth block |
-| is_active | BOOLEAN | Relayer status |
-
-## Quick Start
-
-### 1. Install Dependencies
+### 1. 安装依赖
 
 ```bash
 cd relayer
 npm install
 ```
 
-### 2. Configure Environment
+### 2. 配置环境变量
 
 ```bash
 cp .env.example .env
-# Edit .env with your configuration
+# 编辑 .env 文件，填入实际配置
 ```
 
-Required environment variables:
+### 3. 初始化数据库
 
 ```bash
-# Seth Chain
-SETH_RPC_URL=https://...
-POOL_B_ADDRESS=0x...
+# 创建数据库
+createdb -U postgres bridge_relayer
 
-# Solana
-SOLANA_RPC_URL=https://...
-SOLANA_BRIDGE_PROGRAM_ID=...
-SOLANA_SUSDC_MINT=...
-SOLANA_RELAYER_KEYPAIR_PATH=./relayer-keypair.json
-
-# Database
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=seth_bridge
-DB_USER=postgres
-DB_PASSWORD=...
-
-# Price Service
-COINGECKO_API_KEY=...
-FEE_MARKUP_PERCENT=10
+# 执行初始化脚本
+psql -U postgres -d bridge_relayer -f db/init.sql
 ```
 
-### 3. Initialize Database
+### 4. 启动 Relayer
 
 ```bash
-createdb -U postgres seth_bridge
-psql -U postgres -d seth_bridge -f db/init.sql
-psql -U postgres -d seth_bridge -f db/migrate-add-fields.sql
-psql -U postgres -d seth_bridge -f db/migrate-add-seth-withdrawal.sql
-psql -U postgres -d seth_bridge -f db/migrate-add-user-address-mapping.sql
+# 生产环境
+npm start
+
+# 开发环境 (带热重载)
+npm run dev
 ```
 
-### 4. Run Relayer
+## 数据库表结构
 
-```bash
-# Solana → Seth only
-node relayer.js
+### cross_chain_messages (跨链消息表)
 
-# Seth → Solana only
-node seth-withdrawal-relayer.js
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | SERIAL | 主键 |
+| solana_tx_sig | VARCHAR(88) | Solana 交易签名 |
+| solana_tx_sig_bytes32 | VARCHAR(66) | 转换后的 bytes32 格式 |
+| amount | BIGINT | 跨链金额 |
+| recipient_eth | VARCHAR(42) | Seth 接收地址 |
+| sender_solana | VARCHAR(44) | Solana 发送者地址 |
+| status | VARCHAR(20) | 状态: pending/processing/completed/failed |
+| retry_count | INTEGER | 重试次数 |
+| max_retries | INTEGER | 最大重试次数 |
+| last_error | TEXT | 最后错误信息 |
+| seth_tx_hash | VARCHAR(66) | Seth 链交易哈希 |
+| seth_block_number | BIGINT | Seth 链区块号 |
+| created_at | TIMESTAMP | 创建时间 |
+| processed_at | TIMESTAMP | 处理完成时间 |
+| next_retry_at | TIMESTAMP | 下次重试时间 |
 
-# Bidirectional (both directions)
-node unified-relayer.js
-```
+### relayer_status (Relayer 状态表)
 
-## Message State Machine
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | SERIAL | 主键 |
+| relayer_address | VARCHAR(42) | Relayer Seth 地址 |
+| last_processed_slot | BIGINT | 最后处理的 Solana slot |
+| last_processed_signature | VARCHAR(88) | 最后处理的交易签名 |
+| is_active | BOOLEAN | 是否活跃 |
+| started_at | TIMESTAMP | 启动时间 |
+| updated_at | TIMESTAMP | 更新时间 |
+
+### operation_logs (操作日志表)
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | SERIAL | 主键 |
+| message_id | INTEGER | 关联的消息 ID |
+| operation | VARCHAR(50) | 操作类型 |
+| details | JSONB | 操作详情 |
+| created_at | TIMESTAMP | 创建时间 |
+
+## 消息状态流转
 
 ```
                     ┌──────────────┐
                     │   pending    │◀──────────┐
                     └──────┬───────┘           │
                            │                   │
-                    Process Failed       Retry Time Reached
+                    处理失败              重试时间到
                            │                   │
                            ▼                   │
                     ┌──────────────┐           │
                     │  processing  │───────────┘
                     └──────┬───────┘
                            │
-                    Process Success
+                     处理成功
                            │
                            ▼
                     ┌──────────────┐
                     │   completed  │
                     └──────────────┘
 
-                    Max Retries Exceeded
+                    超过最大重试次数
                            │
                            ▼
                     ┌──────────────┐
@@ -301,35 +192,75 @@ node unified-relayer.js
                     └──────────────┘
 ```
 
-## Retry Strategy
+## 重试策略
 
-The relayer uses **exponential backoff** for failed transactions:
+Relayer 使用**指数退避**策略进行失败重试：
 
-| Retry # | Delay |
-|---------|-------|
-| 1 | Immediate |
-| 2 | 2 minutes |
-| 3 | 4 minutes |
-| 4 | 8 minutes |
-| 5 | 16 minutes |
-| Max | 30 minutes |
+- 第1次重试: 立即
+- 第2次重试: 2分钟后
+- 第3次重试: 4分钟后
+- 第4次重试: 8分钟后
+- 第5次重试: 16分钟后
+- 最大等待时间: 30分钟
 
-## Production Deployment
+## 错误分类
 
-### Using PM2
+### 可重试错误
+
+- 网络超时
+- 连接错误
+- RPC 限流
+- Gas 价格过高
+- Nonce 问题
+
+### 不可重试错误
+
+- 交易已处理
+- 无效的接收地址
+- 无效的金额
+- 余额不足
+
+## 监控和日志
+
+Relayer 每分钟输出统计信息：
+
+```
+[Relayer] Stats: {
+  pending: 0,
+  processing: 1,
+  completed: 100,
+  failed: 2,
+  total: 103,
+  sessionProcessed: 50,
+  sessionFailed: 1,
+  lastProcessedAt: 2024-01-15T10:30:00.000Z
+}
+```
+
+## 安全注意事项
+
+1. **私钥保护**: 永远不要将 `RELAYER_PRIVATE_KEY` 提交到代码库
+2. **数据库安全**: 使用强密码保护 PostgreSQL 数据库
+3. **网络隔离**: 建议将 Relayer 部署在私有网络中
+4. **监控告警**: 设置告警监控 Relayer 状态和失败消息
+
+## 生产部署建议
+
+### 使用 PM2 管理进程
 
 ```bash
+# 安装 PM2
 npm install -g pm2
 
-# Start unified relayer
-pm2 start unified-relayer.js --name bridge-relayer
+# 启动
+pm2 start relayer.js --name bridge-relayer
 
-# Setup auto-restart on boot
+# 设置开机自启
 pm2 startup
 pm2 save
 ```
 
-### Docker Deployment
+### Docker 部署
 
 ```dockerfile
 FROM node:18-alpine
@@ -337,66 +268,52 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install --production
 COPY . .
-CMD ["node", "unified-relayer.js"]
+CMD ["node", "relayer.js"]
 ```
+
+### 环境变量管理
+
+推荐使用环境变量管理工具：
+- Docker Secrets
+- Kubernetes Secrets
+- AWS Secrets Manager
+- HashiCorp Vault
+
+## 故障恢复
+
+### 重启后恢复
+
+Relayer 重启后会自动：
+1. 检查数据库中的待处理消息
+2. 处理所有 `pending` 状态的消息
+3. 处理需要重试的消息
+
+### 数据备份
+
+定期备份 PostgreSQL 数据库：
 
 ```bash
-docker build -t seth-relayer .
-docker run -d --name relayer \
-  --env-file .env \
-  -v ./relayer-keypair.json:/app/relayer-keypair.json \
-  seth-relayer
+pg_dump -U postgres bridge_relayer > backup.sql
 ```
 
-## Monitoring
+## API 扩展
 
-The relayer outputs statistics every minute:
+可以通过扩展 Relayer 添加 API 接口：
 
+```javascript
+const express = require('express');
+const app = express();
+
+app.get('/stats', async (req, res) => {
+    const stats = await db.getStats();
+    res.json(stats);
+});
+
+app.get('/messages/:status', async (req, res) => {
+    const messages = await db.getPendingMessages(100);
+    res.json(messages);
+});
 ```
-[Relayer] Stats: {
-  direction: 'Solana → Seth',
-  pending: 0,
-  processing: 1,
-  completed: 100,
-  failed: 2,
-  total: 103,
-  lastProcessedSlot: 123456789,
-  lastProcessedBlock: 9876543
-}
-
-[Relayer] Stats: {
-  direction: 'Seth → Solana',
-  pending: 0,
-  processing: 0,
-  completed: 50,
-  failed: 0,
-  total: 50,
-  lastSethBlock: 9876543,
-  totalFeesCollected: '15000000'
-}
-```
-
-## Security Considerations
-
-1. **Private Key Protection**: Never commit `RELAYER_PRIVATE_KEY` or keypair files
-2. **Database Security**: Use strong passwords for PostgreSQL
-3. **Network Isolation**: Deploy relayer in private network when possible
-4. **Monitoring & Alerts**: Set up alerts for relayer health and failed messages
-5. **Replay Protection**: Transaction hashes are stored on-chain to prevent double-spending
-
-## Error Handling
-
-### Retriable Errors
-- Network timeouts
-- RPC rate limiting
-- High gas prices
-- Nonce issues
-
-### Non-retriable Errors
-- Transaction already processed
-- Invalid recipient address
-- Invalid amount
-- Insufficient balance
 
 ## License
 

@@ -3,9 +3,9 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
-use crate::{Config, VaultAuthority, UserInfo, CrossChainMessage, CrossChainStatus};
+use crate::{Config, VaultAuthority, UserInfo, CrossChainMessage, CrossChainStatus, SusdcConfig};
 use crate::{BridgeError};
-use crate::{ReferrerSet, CrossChainCompleted, RelayerUpdated};
+use crate::{ReferrerSet, CrossChainCompleted, RelayerUpdated, SusdcVaultSetup};
 
 // ==================== Initialization ====================
 
@@ -320,6 +320,79 @@ pub fn handle_close_user_info(_ctx: Context<CloseUserInfo>) -> Result<()> {
     // 1. Transferring lamports to the user
     // 2. Zeroing out the account data
     // 3. Marking the account as closed
+    Ok(())
+}
+
+// ==================== sUSDC Vault Setup ====================
+
+/// Setup sUSDC vault for cross-chain revenue processing
+/// Creates a SusdcConfig PDA and vault_susdc token account
+/// Must be called by owner after initialize()
+#[derive(Accounts)]
+pub struct SetupSusdcVault<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    #[account(
+        seeds = [b"config"],
+        bump
+    )]
+    pub config: Account<'info, Config>,
+
+    #[account(
+        init,
+        payer = owner,
+        space = 8 + SusdcConfig::INIT_SPACE,
+        seeds = [b"susdc_config"],
+        bump
+    )]
+    pub susdc_config: Account<'info, SusdcConfig>,
+
+    #[account(
+        seeds = [b"vault_authority"],
+        bump
+    )]
+    pub vault_authority: Account<'info, VaultAuthority>,
+
+    /// Vault sUSDC token account (new)
+    #[account(
+        init,
+        payer = owner,
+        token::mint = susdc_mint,
+        token::authority = vault_authority,
+        seeds = [b"vault_susdc_token_account"],
+        bump
+    )]
+    pub vault_susdc_token_account: Account<'info, TokenAccount>,
+
+    /// sUSDC Mint
+    /// CHECK: sUSDC mint address
+    pub susdc_mint: AccountInfo<'info>,
+
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+/// Setup sUSDC vault handler
+pub fn handle_setup_susdc_vault(ctx: Context<SetupSusdcVault>) -> Result<()> {
+    require!(
+        ctx.accounts.owner.key() == ctx.accounts.config.owner,
+        BridgeError::Unauthorized
+    );
+
+    let susdc_config = &mut ctx.accounts.susdc_config;
+    susdc_config.susdc_mint = ctx.accounts.susdc_mint.key();
+    susdc_config.vault_susdc_token_account = ctx.accounts.vault_susdc_token_account.key();
+    susdc_config.bump = ctx.bumps.susdc_config;
+
+    emit!(SusdcVaultSetup {
+        owner: ctx.accounts.owner.key(),
+        susdc_mint: ctx.accounts.susdc_mint.key(),
+        vault_susdc_token_account: ctx.accounts.vault_susdc_token_account.key(),
+        timestamp: Clock::get()?.unix_timestamp,
+    });
+
     Ok(())
 }
 

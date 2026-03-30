@@ -3,9 +3,9 @@ pragma solidity ^0.8.20;
 
 /**
  * @title PoolB - Seth Pricing Pool
- * @notice SETH/sUSDC pricing pool, only allows Treasury as LP
+ * @notice SETH/sUSDC pricing pool, only allows Treasury/Bridge as LP
  * @dev Ownable functionality inlined, no external dependencies
- *      Pool B only allows Treasury as the sole LP to prevent external manipulation
+ *      Pool B only allows Treasury and Bridge as LP to prevent external manipulation
  * 
  * Important: SETH is the native token of Seth chain (similar to ETH), not an ERC20 token
  */
@@ -42,6 +42,7 @@ contract PoolB {
     // SETH is native token, no contract address needed
     address public susdcToken;     // sUSDC token address
     address public treasury;       // Treasury address (sole LP)
+    address public bridge;         // Bridge contract address (allowed to addLiquidity)
     
     // Reserves
     uint256 public reserveSETH;    // Native SETH reserve
@@ -72,13 +73,18 @@ contract PoolB {
         uint256 amountIn,
         uint256 amountOut,
         uint256 price,
-        uint256 timestamp
+        uint256 timestamp,
+        bytes32 solanaRecipient  // Solana recipient address (32 bytes, base58 encoded as bytes32)
     );
     event TreasuryUpdated(address oldTreasury, address newTreasury);
+    event BridgeUpdated(address oldBridge, address newBridge);
     event NativeSETHReceived(address indexed from, uint256 amount);
 
     modifier onlyTreasury() {
-        require(msg.sender == treasury, "PoolB: Only treasury can call");
+        require(
+            msg.sender == treasury || msg.sender == bridge,
+            "PoolB: Only treasury or bridge can call"
+        );
         _;
     }
 
@@ -105,6 +111,14 @@ contract PoolB {
     function setTreasury(address _newTreasury) external onlyOwner {
         emit TreasuryUpdated(treasury, _newTreasury);
         treasury = _newTreasury;
+    }
+
+    /**
+     * @dev Update bridge address
+     */
+    function setBridge(address _newBridge) external onlyOwner {
+        emit BridgeUpdated(bridge, _newBridge);
+        bridge = _newBridge;
     }
 
     // ==================== Price Calculation ====================
@@ -142,7 +156,7 @@ contract PoolB {
     // ==================== Trading Functions ====================
 
     /**
-     * @dev Buy SETH (using sUSDC)
+     * @dev Buy SETH (using sUSDC) - local swap only, no cross-chain
      * @param amountSUSDCIn Input sUSDC amount
      * @param minSETHOut Minimum output SETH amount (slippage protection)
      * @return amountSETHOut Received SETH amount
@@ -171,17 +185,20 @@ contract PoolB {
         totalVolumeSETH += amountSETHOut;
         totalTransactions++;
         
-        emit SwapExecuted(msg.sender, true, amountSUSDCIn, amountSETHOut, getPrice(), block.timestamp);
+        // solanaRecipient is bytes32(0) for buySETH (no cross-chain)
+        emit SwapExecuted(msg.sender, true, amountSUSDCIn, amountSETHOut, getPrice(), block.timestamp, bytes32(0));
     }
 
     /**
-     * @dev Sell SETH (receive sUSDC) - Send native SETH
+     * @dev Sell SETH (receive sUSDC) - Send native SETH, specify Solana address for cross-chain withdrawal
      * @param minSUSDCOut Minimum output sUSDC amount (slippage protection)
+     * @param solanaRecipient Solana recipient address (32 bytes) for cross-chain withdrawal
      * @return amountSUSDCOut Received sUSDC amount
      */
-    function sellSETH(uint256 minSUSDCOut) external payable returns (uint256 amountSUSDCOut) {
+    function sellSETH(uint256 minSUSDCOut, bytes32 solanaRecipient) external payable returns (uint256 amountSUSDCOut) {
         uint256 amountSETHIn = msg.value;
         require(amountSETHIn > 0, "PoolB: Zero SETH input");
+        require(solanaRecipient != bytes32(0), "PoolB: Zero Solana recipient");
         
         // 1. Calculate output
         amountSUSDCOut = getAmountOut(amountSETHIn, reserveSETH, reservesUSDC);
@@ -191,8 +208,9 @@ contract PoolB {
         reserveSETH += amountSETHIn;
         reservesUSDC -= amountSUSDCOut;
         
-        // 3. Transfer out sUSDC
-        require(_transfer(susdcToken, msg.sender, amountSUSDCOut), "PoolB: sUSDC transfer failed");
+        // 3. For cross-chain withdrawal, sUSDC is burned (not transferred to user)
+        // The sUSDC will be minted on Solana by the relayer
+        require(_burn(susdcToken, amountSUSDCOut), "PoolB: sUSDC burn failed");
         
         // 4. Record price
         _recordPrice(amountSETHIn, false);
@@ -202,13 +220,13 @@ contract PoolB {
         totalVolumesUSDC += amountSUSDCOut;
         totalTransactions++;
         
-        emit SwapExecuted(msg.sender, false, amountSETHIn, amountSUSDCOut, getPrice(), block.timestamp);
+        emit SwapExecuted(msg.sender, false, amountSETHIn, amountSUSDCOut, getPrice(), block.timestamp, solanaRecipient);
     }
 
     // ==================== Liquidity Management ====================
 
     /**
-     * @dev Treasury adds liquidity - Send native SETH
+     * @dev Treasury/Bridge adds liquidity - Send native SETH
      * @param amountSUSDC sUSDC amount
      */
     function addLiquidity(uint256 amountSUSDC) external payable onlyTreasury {
@@ -339,6 +357,13 @@ contract PoolB {
     function _transferFrom(address token, address from, address to, uint256 amount) internal returns (bool) {
         (bool success, bytes memory data) = token.call(
             abi.encodeWithSignature("transferFrom(address,address,uint256)", from, to, amount)
+        );
+        return success && (data.length == 0 || abi.decode(data, (bool)));
+    }
+
+    function _burn(address token, uint256 amount) internal returns (bool) {
+        (bool success, bytes memory data) = token.call(
+            abi.encodeWithSignature("burn(address,uint256)", address(this), amount)
         );
         return success && (data.length == 0 || abi.decode(data, (bool)));
     }

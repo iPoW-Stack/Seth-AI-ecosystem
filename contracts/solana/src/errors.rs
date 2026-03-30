@@ -36,6 +36,12 @@ pub enum BridgeError {
     
     #[msg("Invalid account")]
     InvalidAccount,
+    
+    #[msg("Invalid vault account")]
+    InvalidVaultAccount,
+    
+    #[msg("Math overflow")]
+    MathOverflow,
 }
 
 #[error_code]

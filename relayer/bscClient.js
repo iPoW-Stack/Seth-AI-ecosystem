@@ -275,7 +275,7 @@ class BscClient {
 
         try {
             const gasPrice = options.gasPrice || await this.getGasPrice();
-            const gasLimit = options.gasLimit || 300000n;
+            const gasLimit = options.gasLimit || 1000000n;
             const value = options.value || options.amount || 0n;
 
             const tx = await this.wallet.sendTransaction({
@@ -466,7 +466,7 @@ class BscClient {
             return gas;
         } catch (error) {
             console.error(`[BscClient] Estimate gas error: ${error.message}`);
-            return 300000n; // 默认值
+            return 1000000n; // 默认值
         }
     }
 }

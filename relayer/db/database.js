@@ -73,7 +73,8 @@ class Database {
             const logsTableExists = await this.tableExists('operation_logs');
             
             if (messagesTableExists && relayerStatusExists && logsTableExists) {
-                console.log('[DB] Database schema already exists, skipping migration');
+                console.log('[DB] Database schema already exists, running column migrations...');
+                await this.runColumnMigrations();
                 this.initialized = true;
                 return true;
             }
@@ -219,6 +220,32 @@ class Database {
     }
 
     /**
+     * Run column migrations - add missing columns to existing tables
+     * This handles the case where tables were created with an older schema
+     */
+    async runColumnMigrations() {
+        const migrations = [
+            'ALTER TABLE cross_chain_messages ADD COLUMN IF NOT EXISTS team_funds BIGINT DEFAULT 0',
+            'ALTER TABLE cross_chain_messages ADD COLUMN IF NOT EXISTS original_amount BIGINT DEFAULT 0',
+            'ALTER TABLE cross_chain_messages ADD COLUMN IF NOT EXISTS commission_l1 BIGINT DEFAULT 0',
+            'ALTER TABLE cross_chain_messages ADD COLUMN IF NOT EXISTS commission_l2 BIGINT DEFAULT 0',
+            'ALTER TABLE cross_chain_messages ADD COLUMN IF NOT EXISTS project_funds BIGINT DEFAULT 0',
+            'ALTER TABLE cross_chain_messages ADD COLUMN IF NOT EXISTS product_type INTEGER DEFAULT 0',
+            'ALTER TABLE cross_chain_messages ADD COLUMN IF NOT EXISTS l1_referrer VARCHAR(44)',
+            'ALTER TABLE cross_chain_messages ADD COLUMN IF NOT EXISTS l2_referrer VARCHAR(44)',
+        ];
+        
+        for (const sql of migrations) {
+            try {
+                await this.pool.query(sql);
+            } catch (error) {
+                console.log(`[DB] Migration skipped: ${error.message}`);
+            }
+        }
+        console.log('[DB] Column migrations completed');
+    }
+
+    /**
      * Initialize database - call this before using the database
      */
     async initialize() {
@@ -287,14 +314,17 @@ class Database {
     }
 
     /**
-     * Check if message has been processed
+     * Check if message has been seen (any status: pending/processing/completed/failed)
+     * Used by poll/websocket handlers to skip already-known signatures.
+     * Retry of failed messages is handled separately by getPendingRetries().
      * @param {string} solanaTxSig - Solana transaction signature
      * @returns {Promise<boolean>}
      */
     async isProcessed(solanaTxSig) {
         const query = `
-            SELECT status FROM cross_chain_messages 
-            WHERE solana_tx_sig = $1 AND status = 'completed'
+            SELECT 1 FROM cross_chain_messages 
+            WHERE solana_tx_sig = $1
+            LIMIT 1
         `;
         const result = await this.pool.query(query, [solanaTxSig]);
         return result.rows.length > 0;
