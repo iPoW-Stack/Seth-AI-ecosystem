@@ -159,9 +159,10 @@ contract PoolB {
      * @dev Buy SETH (using sUSDC) - local swap only, no cross-chain
      * @param amountSUSDCIn Input sUSDC amount
      * @param minSETHOut Minimum output SETH amount (slippage protection)
+     * @param solanaRecipient Solana recipient address (32 bytes) for receiving sUSDC
      * @return amountSETHOut Received SETH amount
      */
-    function buySETH(uint256 amountSUSDCIn, uint256 minSETHOut) external returns (uint256 amountSETHOut) {
+    function buySETH(uint256 amountSUSDCIn, uint256 minSETHOut, bytes32 solanaRecipient) external returns (uint256 amountSETHOut) {
         // 1. Transfer in sUSDC
         require(_transferFrom(susdcToken, msg.sender, address(this), amountSUSDCIn), "PoolB: sUSDC transfer failed");
         
