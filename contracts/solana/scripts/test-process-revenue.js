@@ -1,22 +1,23 @@
 /**
- * 测试 Solana 侧收入处理 & 跨链消息生成脚本
+ * Test script for Solana-side revenue processing and cross-chain message creation
  *
- * 说明：
- * - 调用 seth_bridge::process_revenue，发送一笔 USDC 收入到 Vault，
- *   触发 10-5-5-50-30 分账，并在链上创建 CrossChainMessage（用于跨链到 Seth）。
- * - 分账比例：L1佣金(10%)、L2佣金(5%)、团队资金(5%)、项目资金(50%)、生态资金(30%)
- * - L1/L2佣金现在记录在用户信息中，通过单独的 distribute_commission 指令分发
- * - 团队资金通过跨链消息处理，不再实时转账
- * - 只测试交易构造和上链，不关心 Seth 侧是否真正到账（由 relayer 负责）。
+ * Notes:
+ * - Calls seth_bridge::process_revenue and transfers a USDC amount into Vault.
+ * - Creates a CrossChainMessage for Seth-side processing by relayer.
+ * - Current split: L1(10%), L2(5%), project(50%), ecosystem(35%).
+ * - L1/L2 commissions are recorded and distributed via distribute_commission.
+ * - This script only validates transaction construction and on-chain execution.
  *
- * 用法：
- *   在 contracts/solana 目录下执行：
+ * Usage:
+ *   Run in contracts/solana:
  *     node scripts/test-process-revenue.js
+ *   Optional:
+ *     USER_KEYPAIR_PATH=... node scripts/test-process-revenue.js
  *
- * 前置条件：
- *   - seth_bridge 程序已部署并 initialize 完成（config / vault 已初始化）
- *   - deployer-keypair.json 中的地址有足够 SOL
- *   - 你有一个 USDC 的用户账户里有少量 USDC 可用于测试
+ * Prerequisites:
+ *   - seth_bridge program is deployed and initialized (config/vault ready)
+ *   - deployer-keypair.json address has enough SOL
+ *   - user owns a USDC token account with test balance
  */
 
 const {
@@ -31,22 +32,19 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-// ----- 配置，根据需要修改 -----
+// ----- Configuration (edit as needed) -----
 
-// 使用的 USDC Mint（devnet）
+// USDC Mint in use (devnet)
 const USDC_MINT = new PublicKey('4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU');
 
-// 测试金额（USDC，6 位小数）
+// Test amount (USDC, 6 decimals)
 const TEST_AMOUNT_USDC = 1; // 1 USDC
 
-// 产品类型（随便填一个 u8）
-const PRODUCT_TYPE = 1;
-
-// Seth 侧接收地址（20 字节，0x 开头）
-// 可以填你在 Seth 的测试地址
+// Seth recipient address (20 bytes, 0x prefixed)
+// Fill with your Seth test address
 // const SETH_RECIPIENT = process.env.SETH_TEST_RECIPIENT || '0x0000000000000000000000000000000000000000';
 const SETH_RECIPIENT = "0x742bf979105179e44aed27baf37d66ef73cc3d88";
-// ----- 帮助函数 -----
+// ----- Helpers -----
 
 function sighash(name) {
   return crypto.createHash('sha256').update(`global:${name}`).digest().slice(0, 8);
@@ -58,7 +56,9 @@ async function main() {
   console.log('========================================\n');
 
   const rpcUrl = process.env.RPC_URL || 'https://devnet.helius-rpc.com/?api-key=453899d1-2296-4503-b3df-fcc3c64436bc';
-  const keypairPath = path.join(__dirname, '../deployer-keypair.json');
+  const keypairPath = process.env.USER_KEYPAIR_PATH
+    ? path.resolve(process.env.USER_KEYPAIR_PATH)
+    : path.join(__dirname, '../deployer-keypair.json');
 
   const secret = JSON.parse(fs.readFileSync(keypairPath, 'utf-8'));
   const payer = Keypair.fromSecretKey(Uint8Array.from(secret));
@@ -71,19 +71,19 @@ async function main() {
   const balance = await connection.getBalance(payer.publicKey);
   console.log('SOL balance:', balance / 1e9, 'SOL\n');
 
-  // 1. 读取部署信息，拿到 programId
+  // 1. Resolve programId
   // const deployInfoPath = path.join(__dirname, '../deployment-info.json');
   // if (!fs.existsSync(deployInfoPath)) {
-  //   throw new Error('deployment-info.json 不存在，请先部署合约');
+  //   throw new Error('deployment-info.json not found; deploy contract first');
   // }
   // const deployInfo = JSON.parse(fs.readFileSync(deployInfoPath, 'utf-8'));
   // const programId = new PublicKey(deployInfo.programId || deployInfo.sethBridgeProgramId || '2PpwtfR2QHfR7qGhH8eaeiTiJac8LfdSQFdR6FJf6aF9');
 
   // console.log('seth_bridge Program ID:', programId.toBase58());
 
-  const programId = new PublicKey("125eQs1s3SNxd5KFRpAJ6JvtVpD4tRYw6fWKomibQ8tc");
+  const programId = new PublicKey("GmfLWKJuTgyaNvro91Vd8mwg8BXccgXS3jZ4WTjsAan5");
 
-  // 2. 计算 config / vault / user-info / cross-chain PDA
+  // 2. Derive config / vault / user-info / cross-chain PDAs
   const [configPda] = PublicKey.findProgramAddressSync(
     [Buffer.from('config')],
     programId
@@ -106,19 +106,19 @@ async function main() {
   console.log('Vault Token Account PDA:', vaultTokenPda.toBase58());
   console.log('UserInfo PDA:', userInfoPda.toBase58());
 
-  // 从链上获取 user_info 和 config
+  // Fetch user_info and config from chain
   const [userInfoAcc, configAcc] = await Promise.all([
     connection.getAccountInfo(userInfoPda),
     connection.getAccountInfo(configPda),
   ]);
   if (!userInfoAcc) {
-    throw new Error('UserInfo 未初始化，请先运行 test-set-referrer.js');
+    throw new Error('UserInfo is not initialized; run test-set-referrer.js first');
   }
   if (!configAcc) {
-    throw new Error('Config 未初始化，请先部署并 initialize 桥');
+    throw new Error('Config is not initialized; deploy and initialize bridge first');
   }
 
-  // Config 布局:
+  // Config layout:
   // 8 discriminator + 32 owner + 32 seth_treasury + 32 team_wallet + 32 project_wallet + 
   // 32 vault_authority + 32 relayer + 1 bump + 8 total_revenue + ...
   const configData = configAcc.data;
@@ -138,7 +138,7 @@ async function main() {
   );
   console.log('CrossChainMessage PDA (total_revenue=' + totalRevenue + '):', crossChainMsgPda.toBase58());
 
-  // 3. 用户 USDC TokenAccount（这里假设与你 payer 相同的 owner，使用 ATA）
+  // 3. User USDC token account (ATA of payer)
   const {
     getAssociatedTokenAddressSync,
   } = require('@solana/spl-token');
@@ -148,7 +148,7 @@ async function main() {
   );
   console.log('User USDC ATA:', userUsdcAta.toBase58());
   
-  // 项目方 USDC 接收账户（使用 config 中配置的 project_wallet 对应的 ATA）
+  // Project USDC receiving account (ATA derived from config.project_wallet)
   const projectTokenAccount = getAssociatedTokenAddressSync(
     USDC_MINT,
     projectWallet
@@ -156,18 +156,16 @@ async function main() {
   console.log('Project Token Account (from config.project_wallet):', projectTokenAccount.toBase58());
   console.log('');
 
-  // 4. 构造指令 data
-  const amountU64 = BigInt(TEST_AMOUNT_USDC * 1_000_000); // 6 小数
+  // 4. Build instruction data
+  const amountU64 = BigInt(TEST_AMOUNT_USDC * 1_000_000); // 6 decimals
   const bufAmount = Buffer.alloc(8);
   bufAmount.writeBigUInt64LE(amountU64);
-
-  const bufProductType = Buffer.from([PRODUCT_TYPE & 0xff]);
 
   let sethHex = SETH_RECIPIENT.startsWith('0x')
     ? SETH_RECIPIENT.slice(2)
     : SETH_RECIPIENT;
   if (sethHex.length !== 40) {
-    console.warn('SETH_RECIPIENT 长度不为 20 字节，脚本会自动截断/填充。');
+    console.warn('SETH_RECIPIENT is not 20 bytes; script will truncate/pad automatically.');
   }
   const sethBuf = Buffer.alloc(20);
   Buffer.from(sethHex.padStart(40, '0'), 'hex').copy(sethBuf);
@@ -175,13 +173,12 @@ async function main() {
   const data = Buffer.concat([
     sighash('process_revenue'),
     bufAmount,
-    bufProductType,
     sethBuf,
   ]);
 
-  // 5. 准备账户列表（顺序必须与 ProcessRevenue<'info> 一致）
-  // 新版合约结构简化，不再需要 l1/l2/team 账户
-  // 账户顺序：user, user_token_account, vault_token_account, vault_authority, config, user_info,
+  // 5. Prepare account metas (must match ProcessRevenue<'info> order)
+  // New contract structure is simplified and no longer requires l1/l2/team accounts
+  // Account order: user, user_token_account, vault_token_account, vault_authority, config, user_info,
   //          project_token_account, cross_chain_message, token_program, system_program
   const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
 
@@ -192,7 +189,7 @@ async function main() {
     { pubkey: vaultAuthorityPda,   isSigner: false, isWritable: false }, // vault_authority
     { pubkey: configPda,           isSigner: false, isWritable: true },  // config
     { pubkey: userInfoPda,         isSigner: false, isWritable: true },  // user_info
-    { pubkey: projectTokenAccount, isSigner: false, isWritable: true },  // project_token_account (50% 实时转账)
+    { pubkey: projectTokenAccount, isSigner: false, isWritable: true },  // project_token_account (50% realtime transfer)
     { pubkey: crossChainMsgPda,    isSigner: false, isWritable: true },  // cross_chain_message
     { pubkey: TOKEN_PROGRAM_ID,    isSigner: false, isWritable: false }, // token_program
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
@@ -217,21 +214,20 @@ async function main() {
   console.log('Confirmed:', conf.value);
 
   console.log('\n========================================');
-  console.log('交易完成！');
+  console.log('Transaction completed!');
   console.log('========================================');
-  console.log('分账明细（基于 ' + TEST_AMOUNT_USDC + ' USDC）:');
-  console.log('  - L1 佣金 (10%):', (TEST_AMOUNT_USDC * 0.1).toFixed(2), 'USDC - 记录在链上，通过 distribute_commission 分发');
-  console.log('  - L2 佣金 (5%):', (TEST_AMOUNT_USDC * 0.05).toFixed(2), 'USDC - 记录在链上，通过 distribute_commission 分发');
-  console.log('  - 团队资金 (5%):', (TEST_AMOUNT_USDC * 0.05).toFixed(2), 'USDC - 通过跨链消息发送到 Seth');
-  console.log('  - 项目资金 (50%):', (TEST_AMOUNT_USDC * 0.5).toFixed(2), 'USDC - 已实时转账到 project_token_account');
-  console.log('  - 生态资金 (30%):', (TEST_AMOUNT_USDC * 0.3).toFixed(2), 'USDC - 通过跨链消息发送到 Seth');
-  console.log('\n你可以在 relayer 日志中查看是否检测到这笔 RevenueProcessed 事件。');
+  console.log('Split details (based on ' + TEST_AMOUNT_USDC + ' USDC):');
+  console.log('  - L1 commission (10%):', (TEST_AMOUNT_USDC * 0.1).toFixed(2), 'USDC - recorded on-chain, distributed via distribute_commission');
+  console.log('  - L2 commission (5%):', (TEST_AMOUNT_USDC * 0.05).toFixed(2), 'USDC - recorded on-chain, distributed via distribute_commission');
+  console.log('  - Project reserve (50%):', (TEST_AMOUNT_USDC * 0.5).toFixed(2), 'USDC - transferred to project_token_account in realtime');
+  console.log('  - Ecosystem funds (35%):', (TEST_AMOUNT_USDC * 0.35).toFixed(2), 'USDC - sent to Seth via cross-chain message');
+  console.log('\nCheck relayer logs for RevenueProcessed detection.');
 }
 
 main()
   .then(() => process.exit(0))
   .catch((err) => {
-    console.error('\n❌ 测试失败:', err);
+    console.error('\nTest failed:', err);
     process.exit(1);
   });
 

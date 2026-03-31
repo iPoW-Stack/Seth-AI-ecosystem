@@ -1,0 +1,17 @@
+{
+  "network": "seth",
+  "host": "35.197.170.240",
+  "port": 23001,
+  "sUSDC": "0x9dc35981a164a855f2712d4017ae399c692a5f8e",
+  "SethBridge": "0x6bb530a38736bea66d6311aa39c6348134b51ff6",
+  "Treasury": "0xf5389732f4de8ac4bf99791b0d664d5e7d862219",
+  "PoolB": "0x916df4dd46b9cb05e00dd805d0a24e86544a45a6",
+  "relayer": "0x742bf979105179e44aed27baf37d66ef73cc3d88",
+  "deployer": "0x742bf979105179e44aed27baf37d66ef73cc3d88",
+  "notes": [
+    "Set relayer/.env SETH_BRIDGE_ADDRESS to SethBridge (0x + address).",
+    "RELAYER_PRIVATE_KEY must match `relayer` address above.",
+    "35% PoolB path: Bridge mints sUSDC \u2192 Treasury \u2192 PoolB; SethBridge.setTreasury must be set (deploy does).",
+    "Initial PoolB liquidity: deployer was added as sUSDC minter, sUSDC minted to Treasury, injectToPoolB executed (Seth-side only)."
+  ]
+}

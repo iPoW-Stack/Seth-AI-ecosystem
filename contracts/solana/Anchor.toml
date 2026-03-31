@@ -7,11 +7,11 @@ members = [".", "dirm"]
 
 [programs.localnet]
 seth_bridge = "2PpwtfR2QHfR7qGhH8eaeiTiJac8LfdSQFdR6FJf6aF9"
-dirm = "3JXLqa4oqswBh4knQrVUJh1iyxjTufF5kijDiSsQZSx8"
+dirm = "idehdzFDKcnizix3YGrBs1T1JP5YFZaCrGeKJeuYZ62"
 
 [programs.devnet]
-seth_bridge = "125eQs1s3SNxd5KFRpAJ6JvtVpD4tRYw6fWKomibQ8tc"
-dirm = "3JXLqa4oqswBh4knQrVUJh1iyxjTufF5kijDiSsQZSx8"
+seth_bridge = "GmfLWKJuTgyaNvro91Vd8mwg8BXccgXS3jZ4WTjsAan5"
+dirm = "idehdzFDKcnizix3YGrBs1T1JP5YFZaCrGeKJeuYZ62"
 
 [scripts]
 initialize = "node scripts/initialize.js"

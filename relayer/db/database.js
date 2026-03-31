@@ -1,4 +1,4 @@
-const { Pool } = require('pg');
+const mysql = require('mysql2/promise');
 const fs = require('fs');
 const path = require('path');
 
@@ -8,22 +8,25 @@ const path = require('path');
  */
 class Database {
     constructor(config) {
-        this.pool = new Pool({
+        this.pool = mysql.createPool({
             host: config.host || 'localhost',
-            port: config.port || 5432,
+            port: config.port || 3306,
             database: config.database || 'bridge_relayer',
-            user: config.user || 'postgres',
+            user: config.user || 'root',
             password: config.password || '',
-            max: config.maxConnections || 10,
-            idleTimeoutMillis: 30000,
-            connectionTimeoutMillis: 5000,
-        });
-
-        this.pool.on('error', (err) => {
-            console.error('[DB] Unexpected error on idle client:', err.message);
+            waitForConnections: true,
+            connectionLimit: config.maxConnections || 10,
+            queueLimit: 0,
+            multipleStatements: true,
+            timezone: 'Z',
         });
         
         this.initialized = false;
+    }
+
+    async _query(sql, params = []) {
+        const [rows] = await this.pool.execute(sql, params);
+        return rows;
     }
 
     /**
@@ -31,10 +34,8 @@ class Database {
      */
     async testConnection() {
         try {
-            const client = await this.pool.connect();
-            const result = await client.query('SELECT NOW()');
-            client.release();
-            console.log('[DB] Connected successfully at:', result.rows[0].now);
+            const rows = await this._query('SELECT NOW() AS now');
+            console.log('[DB] Connected successfully at:', rows[0].now);
             return true;
         } catch (error) {
             console.error('[DB] Connection failed:', error.message);
@@ -43,179 +44,31 @@ class Database {
     }
 
     /**
-     * Check if a table exists
-     * @param {string} tableName - Table name to check
-     * @returns {Promise<boolean>}
-     */
-    async tableExists(tableName) {
-        const query = `
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_name = $1
-            )
-        `;
-        const result = await this.pool.query(query, [tableName]);
-        return result.rows[0].exists;
-    }
-
-    /**
-     * Run database migrations - create tables if they don't exist
-     * This is called automatically on first startup
+     * Apply schema from db/init.sql (idempotent; single source of truth).
      */
     async runMigrations() {
-        console.log('[DB] Checking database schema...');
-        
-        try {
-            // Check if main tables exist
-            const messagesTableExists = await this.tableExists('cross_chain_messages');
-            const relayerStatusExists = await this.tableExists('relayer_status');
-            const logsTableExists = await this.tableExists('operation_logs');
-            
-            if (messagesTableExists && relayerStatusExists && logsTableExists) {
-                console.log('[DB] Database schema already exists, skipping migration');
-                this.initialized = true;
-                return true;
-            }
-            
-            console.log('[DB] Running database migrations...');
-            
-            // Read and execute init.sql
-            const initSqlPath = path.join(__dirname, 'init.sql');
-            
-            if (!fs.existsSync(initSqlPath)) {
-                console.error('[DB] init.sql not found, creating tables programmatically');
-                await this.createTablesProgrammatically();
-            } else {
-                const sql = fs.readFileSync(initSqlPath, 'utf8');
-                await this.pool.query(sql);
-                console.log('[DB] Database schema created from init.sql');
-            }
-            
-            this.initialized = true;
-            console.log('[DB] Database migrations completed successfully');
-            return true;
-            
-        } catch (error) {
-            console.error('[DB] Migration failed:', error.message);
-            
-            // Try programmatic creation as fallback
-            try {
-                await this.createTablesProgrammatically();
-                this.initialized = true;
-                console.log('[DB] Tables created programmatically as fallback');
-                return true;
-            } catch (fallbackError) {
-                console.error('[DB] Fallback table creation also failed:', fallbackError.message);
-                return false;
-            }
+        const initSqlPath = path.join(__dirname, 'init.sql');
+        if (!fs.existsSync(initSqlPath)) {
+            console.error('[DB] init.sql not found');
+            return false;
         }
-    }
 
-    /**
-     * Create tables programmatically (fallback if init.sql is not available)
-     */
-    async createTablesProgrammatically() {
-        // Create cross_chain_messages table
-        await this.pool.query(`
-            CREATE TABLE IF NOT EXISTS cross_chain_messages (
-                id SERIAL PRIMARY KEY,
-                solana_tx_sig VARCHAR(88) NOT NULL UNIQUE,
-                solana_tx_sig_bytes32 VARCHAR(66) NOT NULL,
-                sender_solana VARCHAR(50),
-                amount NUMERIC(78, 0) NOT NULL,
-                team_funds NUMERIC(78, 0) DEFAULT 0,
-                recipient_eth VARCHAR(42) NOT NULL,
-                solana_block_time BIGINT,
-                status VARCHAR(20) NOT NULL DEFAULT 'pending',
-                seth_tx_hash VARCHAR(66),
-                seth_block_number BIGINT,
-                retry_count INTEGER DEFAULT 0,
-                max_retries INTEGER DEFAULT 5,
-                next_retry_at TIMESTAMP,
-                last_error TEXT,
-                created_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW(),
-                processed_at TIMESTAMP,
-                CONSTRAINT valid_status CHECK (status IN ('pending', 'processing', 'completed', 'failed'))
-            )
-        `);
-        
-        // Create indexes for cross_chain_messages
-        await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_status ON cross_chain_messages(status)`);
-        await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_created_at ON cross_chain_messages(created_at)`);
-        await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_solana_tx_sig ON cross_chain_messages(solana_tx_sig)`);
-        
-        // Create relayer_status table
-        await this.pool.query(`
-            CREATE TABLE IF NOT EXISTS relayer_status (
-                id SERIAL PRIMARY KEY,
-                relayer_address VARCHAR(42),
-                last_processed_slot BIGINT,
-                last_processed_signature VARCHAR(88),
-                is_active BOOLEAN DEFAULT FALSE,
-                started_at TIMESTAMP,
-                last_heartbeat TIMESTAMP,
-                created_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW()
-            )
-        `);
-        
-        // Insert default relayer status if not exists
-        await this.pool.query(`
-            INSERT INTO relayer_status (is_active) 
-            SELECT FALSE 
-            WHERE NOT EXISTS (SELECT 1 FROM relayer_status)
-        `);
-        
-        // Create operation_logs table
-        await this.pool.query(`
-            CREATE TABLE IF NOT EXISTS operation_logs (
-                id SERIAL PRIMARY KEY,
-                message_id INTEGER REFERENCES cross_chain_messages(id),
-                operation VARCHAR(50) NOT NULL,
-                details JSONB,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        `);
-        
-        // Create indexes for operation_logs
-        await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_logs_message_id ON operation_logs(message_id)`);
-        await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_logs_operation ON operation_logs(operation)`);
-        
-        // Create update timestamp trigger function
-        await this.pool.query(`
-            CREATE OR REPLACE FUNCTION update_timestamp()
-            RETURNS TRIGGER AS $$
-            BEGIN
-                NEW.updated_at = NOW();
-                RETURN NEW;
-            END;
-            $$ LANGUAGE plpgsql
-        `);
-        
-        // Apply triggers (drop if exists first to avoid errors)
-        await this.pool.query(`
-            DROP TRIGGER IF EXISTS update_messages_timestamp ON cross_chain_messages
-        `);
-        await this.pool.query(`
-            CREATE TRIGGER update_messages_timestamp
-                BEFORE UPDATE ON cross_chain_messages
-                FOR EACH ROW
-                EXECUTE FUNCTION update_timestamp()
-        `);
-        
-        await this.pool.query(`
-            DROP TRIGGER IF EXISTS update_relayer_timestamp ON relayer_status
-        `);
-        await this.pool.query(`
-            CREATE TRIGGER update_relayer_timestamp
-                BEFORE UPDATE ON relayer_status
-                FOR EACH ROW
-                EXECUTE FUNCTION update_timestamp()
-        `);
-        
-        console.log('[DB] All tables and indexes created successfully');
+        try {
+            console.log('[DB] Applying db/init.sql...');
+            const sql = fs.readFileSync(initSqlPath, 'utf8');
+            const conn = await this.pool.getConnection();
+            try {
+                await conn.query(sql);
+            } finally {
+                conn.release();
+            }
+            this.initialized = true;
+            console.log('[DB] Schema ready');
+            return true;
+        } catch (error) {
+            console.error('[DB] Schema init failed:', error.message);
+            return false;
+        }
     }
 
     /**
@@ -229,7 +82,7 @@ class Database {
         
         const migrated = await this.runMigrations();
         if (!migrated) {
-            throw new Error('Database migration failed');
+            throw new Error('Database schema init failed (see logs; check db/init.sql)');
         }
         
         return true;
@@ -253,26 +106,27 @@ class Database {
     async insertMessage(message) {
         const query = `
             INSERT INTO cross_chain_messages (
-                solana_tx_sig, solana_tx_sig_bytes32, amount, team_funds,
+                solana_tx_sig, solana_tx_sig_bytes32, amount,
                 recipient_eth, sender_solana, solana_block_time, status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            ON CONFLICT (solana_tx_sig) DO NOTHING
-            RETURNING *
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE id = id
         `;
         
         const values = [
             message.solanaTxSig,
             message.solanaTxSigBytes32,
             message.amount,
-            message.teamFunds || 0,
             message.recipientEth,
             message.senderSolana,
             message.solanaBlockTime,
             'pending'
         ];
 
-        const result = await this.pool.query(query, values);
-        return result.rows[0];
+        const result = await this._query(query, values);
+        if (result.insertId) {
+            return this.getMessageBySig(message.solanaTxSig);
+        }
+        return null;
     }
 
     /**
@@ -281,9 +135,9 @@ class Database {
      * @returns {Promise<Object|null>}
      */
     async getMessageBySig(solanaTxSig) {
-        const query = 'SELECT * FROM cross_chain_messages WHERE solana_tx_sig = $1';
-        const result = await this.pool.query(query, [solanaTxSig]);
-        return result.rows[0] || null;
+        const query = 'SELECT * FROM cross_chain_messages WHERE solana_tx_sig = ?';
+        const rows = await this._query(query, [solanaTxSig]);
+        return rows[0] || null;
     }
 
     /**
@@ -294,10 +148,10 @@ class Database {
     async isProcessed(solanaTxSig) {
         const query = `
             SELECT status FROM cross_chain_messages 
-            WHERE solana_tx_sig = $1 AND status = 'completed'
+            WHERE solana_tx_sig = ? AND status = 'completed'
         `;
-        const result = await this.pool.query(query, [solanaTxSig]);
-        return result.rows.length > 0;
+        const rows = await this._query(query, [solanaTxSig]);
+        return rows.length > 0;
     }
 
     /**
@@ -309,9 +163,9 @@ class Database {
         const query = `
             UPDATE cross_chain_messages 
             SET status = 'processing', updated_at = NOW()
-            WHERE id = $1 AND status IN ('pending', 'failed')
+            WHERE id = ? AND status IN ('pending', 'failed')
         `;
-        await this.pool.query(query, [messageId]);
+        await this._query(query, [messageId]);
     }
 
     /**
@@ -323,16 +177,16 @@ class Database {
         const query = `
             UPDATE cross_chain_messages 
             SET status = 'completed', 
-                seth_tx_hash = $2, 
-                seth_block_number = $3,
+                seth_tx_hash = ?, 
+                seth_block_number = ?,
                 processed_at = NOW(),
                 updated_at = NOW()
-            WHERE id = $1
+            WHERE id = ?
         `;
-        await this.pool.query(query, [
-            messageId, 
+        await this._query(query, [
             txInfo.txHash, 
-            txInfo.blockNumber
+            txInfo.blockNumber,
+            messageId,
         ]);
         
         await this.logOperation(messageId, 'complete', { txInfo });
@@ -347,27 +201,28 @@ class Database {
     async markAsFailed(messageId, error, maxRetries = 5) {
         const query = `
             UPDATE cross_chain_messages 
-            SET status = CASE WHEN retry_count >= $3 THEN 'failed' ELSE 'pending' END,
+            SET status = CASE WHEN retry_count >= ? THEN 'failed' ELSE 'pending' END,
                 retry_count = retry_count + 1,
-                last_error = $2,
+                last_error = ?,
                 next_retry_at = CASE 
-                    WHEN retry_count < $3 THEN NOW() + INTERVAL '1 minute' * LEAST(POWER(2, retry_count), 30)
+                    WHEN retry_count < ? THEN DATE_ADD(NOW(), INTERVAL LEAST(POW(2, retry_count), 30) MINUTE)
                     ELSE NULL 
                 END,
                 updated_at = NOW()
-            WHERE id = $1
-            RETURNING retry_count, status
+            WHERE id = ?
         `;
-        const result = await this.pool.query(query, [messageId, error, maxRetries]);
+        await this._query(query, [maxRetries, error, maxRetries, messageId]);
+        const rows = await this._query('SELECT retry_count, status FROM cross_chain_messages WHERE id = ?', [messageId]);
+        const row = rows[0];
         
-        if (result.rows[0]) {
+        if (row) {
             await this.logOperation(messageId, 'fail', { 
                 error, 
-                retryCount: result.rows[0].retry_count 
+                retryCount: row.retry_count 
             });
         }
         
-        return result.rows[0];
+        return row;
     }
 
     /**
@@ -383,10 +238,9 @@ class Database {
               AND retry_count < max_retries
               AND next_retry_at <= NOW()
             ORDER BY created_at ASC
-            LIMIT $1
+            LIMIT ?
         `;
-        const result = await this.pool.query(query, [limit]);
-        return result.rows;
+        return this._query(query, [limit]);
     }
 
     /**
@@ -399,10 +253,9 @@ class Database {
             SELECT * FROM cross_chain_messages 
             WHERE status = 'pending'
             ORDER BY created_at ASC
-            LIMIT $1
+            LIMIT ?
         `;
-        const result = await this.pool.query(query, [limit]);
-        return result.rows;
+        return this._query(query, [limit]);
     }
 
     /**
@@ -417,19 +270,38 @@ class Database {
             FROM cross_chain_messages
             GROUP BY status
         `;
-        const result = await this.pool.query(query);
+        const result = await this._query(query);
         
         const stats = {
             pending: 0,
             processing: 0,
             completed: 0,
             failed: 0,
-            total: 0
+            total: 0,
+            withdraw: {
+                pending: 0,
+                processing: 0,
+                completed: 0,
+                failed: 0,
+                total: 0,
+            },
         };
         
         result.rows.forEach(row => {
             stats[row.status] = parseInt(row.count);
             stats.total += parseInt(row.count);
+        });
+
+        const wq = await this._query(`
+            SELECT status, COUNT(*) AS count
+            FROM seth_withdraw_requests
+            GROUP BY status
+        `);
+        wq.rows.forEach(row => {
+            if (stats.withdraw[row.status] !== undefined) {
+                stats.withdraw[row.status] = row.count;
+            }
+            stats.withdraw.total += row.count;
         });
         
         return stats;
@@ -443,8 +315,8 @@ class Database {
      */
     async getRelayerStatus() {
         const query = 'SELECT * FROM relayer_status ORDER BY id DESC LIMIT 1';
-        const result = await this.pool.query(query);
-        return result.rows[0];
+        const rows = await this._query(query);
+        return rows[0];
     }
 
     /**
@@ -454,13 +326,14 @@ class Database {
     async updateRelayerStatus(status) {
         const query = `
             UPDATE relayer_status 
-            SET last_processed_slot = COALESCE($1, last_processed_slot),
-                last_processed_signature = COALESCE($2, last_processed_signature),
-                relayer_address = COALESCE($3, relayer_address),
+            SET last_processed_slot = COALESCE(?, last_processed_slot),
+                last_processed_signature = COALESCE(?, last_processed_signature),
+                relayer_address = COALESCE(?, relayer_address),
                 updated_at = NOW()
-            WHERE id = (SELECT MIN(id) FROM relayer_status)
+            ORDER BY id ASC
+            LIMIT 1
         `;
-        await this.pool.query(query, [
+        await this._query(query, [
             status.lastProcessedSlot || null,
             status.lastProcessedSignature || null,
             status.relayerAddress || null
@@ -474,10 +347,11 @@ class Database {
     async setRelayerActive(isActive) {
         const query = `
             UPDATE relayer_status 
-            SET is_active = $1, updated_at = NOW()
-            WHERE id = (SELECT MIN(id) FROM relayer_status)
+            SET is_active = ?, updated_at = NOW()
+            ORDER BY id ASC
+            LIMIT 1
         `;
-        await this.pool.query(query, [isActive]);
+        await this._query(query, [isActive]);
     }
 
     // ==================== Operation Logs ====================
@@ -491,9 +365,9 @@ class Database {
     async logOperation(messageId, operation, details = {}) {
         const query = `
             INSERT INTO operation_logs (message_id, operation, details)
-            VALUES ($1, $2, $3)
+            VALUES (?, ?, ?)
         `;
-        await this.pool.query(query, [messageId, operation, JSON.stringify(details)]);
+        await this._query(query, [messageId, operation, JSON.stringify(details)]);
     }
 
     /**
@@ -504,11 +378,162 @@ class Database {
     async getOperationLogs(messageId) {
         const query = `
             SELECT * FROM operation_logs 
-            WHERE message_id = $1 
+            WHERE message_id = ? 
             ORDER BY created_at DESC
         `;
-        const result = await this.pool.query(query, [messageId]);
-        return result.rows;
+        return this._query(query, [messageId]);
+    }
+
+    // ==================== Seth Reverse Withdraw Tracking ====================
+
+    async logWithdrawOperation(withdrawId, operation, details = {}) {
+        const query = `
+            INSERT INTO withdraw_operation_logs (withdraw_id, operation, details)
+            VALUES (?, ?, ?)
+        `;
+        await this._query(query, [withdrawId, operation, JSON.stringify(details)]);
+    }
+
+    async getSethWithdrawByRequestId(bridgeAddress, requestId) {
+        const rows = await this._query(
+            'SELECT * FROM seth_withdraw_requests WHERE bridge_address = ? AND request_id = ?',
+            [bridgeAddress, requestId]
+        );
+        return rows[0] || null;
+    }
+
+    async upsertSethWithdrawRequest(bridgeAddress, requestId, req, status = 'pending') {
+        const query = `
+            INSERT INTO seth_withdraw_requests (
+                bridge_address, request_id, user_address, solana_recipient, susdc_amount,
+                created_at_onchain, onchain_processed, status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+                user_address = COALESCE(VALUES(user_address), user_address),
+                solana_recipient = COALESCE(VALUES(solana_recipient), solana_recipient),
+                susdc_amount = COALESCE(VALUES(susdc_amount), susdc_amount),
+                created_at_onchain = COALESCE(VALUES(created_at_onchain), created_at_onchain),
+                onchain_processed = VALUES(onchain_processed),
+                status = VALUES(status),
+                updated_at = NOW()
+        `;
+        const values = [
+            bridgeAddress,
+            requestId,
+            req?.user || null,
+            req?.solanaRecipient || null,
+            req?.susdcAmount != null ? String(req.susdcAmount) : null,
+            req?.createdAt != null ? Number(req.createdAt) : null,
+            req?.processed === true,
+            status,
+        ];
+        await this._query(query, values);
+        return this.getSethWithdrawByRequestId(bridgeAddress, requestId);
+    }
+
+    async markSethWithdrawProcessing(bridgeAddress, requestId, req) {
+        return this.upsertSethWithdrawRequest(bridgeAddress, requestId, req, 'processing');
+    }
+
+    async markSethWithdrawCompleted(bridgeAddress, requestId, solanaUnlockTxSig, sethMarkProcessedTxHash) {
+        const query = `
+            UPDATE seth_withdraw_requests
+            SET status = 'completed',
+                solana_unlock_tx_sig = COALESCE(?, solana_unlock_tx_sig),
+                seth_mark_processed_tx_hash = COALESCE(?, seth_mark_processed_tx_hash),
+                last_error = NULL,
+                next_retry_at = NULL,
+                retry_count = 0,
+                processed_at = NOW(),
+                updated_at = NOW()
+            WHERE bridge_address = ? AND request_id = ?
+        `;
+        await this._query(query, [
+            solanaUnlockTxSig || null,
+            sethMarkProcessedTxHash || null,
+            bridgeAddress,
+            requestId,
+        ]);
+        const row = await this.getSethWithdrawByRequestId(bridgeAddress, requestId);
+        if (row) {
+            await this.logWithdrawOperation(row.id, 'complete', {
+                solana_unlock_tx_sig: solanaUnlockTxSig,
+                seth_mark_processed_tx_hash: sethMarkProcessedTxHash,
+            });
+        }
+        return row;
+    }
+
+    /**
+     * Same backoff semantics as markAsFailed for cross_chain_messages.
+     */
+    async markSethWithdrawFailed(bridgeAddress, requestId, errorMessage, maxRetries = 5) {
+        const query = `
+            INSERT INTO seth_withdraw_requests (
+                bridge_address, request_id, status, last_error, onchain_processed, max_retries,
+                retry_count, next_retry_at
+            )
+            VALUES (
+                ?, ?, 'pending', ?, false, ?, 1,
+                DATE_ADD(NOW(), INTERVAL 1 MINUTE)
+            )
+            ON DUPLICATE KEY UPDATE
+                status = CASE
+                    WHEN onchain_processed = true THEN 'completed'
+                    WHEN retry_count >= ? THEN 'failed'
+                    ELSE 'pending'
+                END,
+                retry_count = CASE
+                    WHEN onchain_processed = true THEN retry_count
+                    ELSE retry_count + 1
+                END,
+                last_error = CASE
+                    WHEN onchain_processed = true THEN last_error
+                    ELSE VALUES(last_error)
+                END,
+                next_retry_at = CASE
+                    WHEN onchain_processed = true THEN NULL
+                    WHEN retry_count < ? THEN
+                        DATE_ADD(NOW(), INTERVAL LEAST(POW(2, retry_count), 30) MINUTE)
+                    ELSE NULL
+                END,
+                updated_at = NOW()
+        `;
+        await this._query(query, [
+            bridgeAddress, requestId, errorMessage, maxRetries,
+            maxRetries, maxRetries,
+        ]);
+        const row = await this.getSethWithdrawByRequestId(bridgeAddress, requestId);
+        if (row) {
+            await this.logWithdrawOperation(row.id, 'fail', {
+                error: errorMessage,
+                retryCount: row.retry_count,
+                status: row.status,
+            });
+        }
+        return row;
+    }
+
+    async getPendingWithdrawRetries(bridgeAddress, limit = 10) {
+        const query = `
+            SELECT * FROM seth_withdraw_requests
+            WHERE bridge_address = ?
+              AND status = 'pending'
+              AND retry_count > 0
+              AND retry_count < max_retries
+              AND next_retry_at IS NOT NULL
+              AND next_retry_at <= NOW()
+              AND onchain_processed = false
+            ORDER BY first_seen_at ASC
+            LIMIT ?
+        `;
+        return this._query(query, [bridgeAddress, limit]);
+    }
+
+    /** @deprecated use markSethWithdrawFailed — kept for callers that only pass (id, err) */
+    async markSethWithdrawQueryFailed(bridgeAddress, requestId, errorMessage) {
+        return this.markSethWithdrawFailed(bridgeAddress, requestId, errorMessage);
     }
 
     // ==================== Batch Operations ====================
@@ -518,22 +543,21 @@ class Database {
      * @param {Array} messages - Message array
      */
     async batchInsertMessages(messages) {
-        const client = await this.pool.connect();
+        const client = await this.pool.getConnection();
         try {
-            await client.query('BEGIN');
+            await client.beginTransaction();
             
             for (const msg of messages) {
                 await client.query(`
                     INSERT INTO cross_chain_messages (
-                        solana_tx_sig, solana_tx_sig_bytes32, amount, team_funds,
+                        solana_tx_sig, solana_tx_sig_bytes32, amount,
                         recipient_eth, sender_solana, solana_block_time, status
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                    ON CONFLICT (solana_tx_sig) DO NOTHING
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON DUPLICATE KEY UPDATE id = id
                 `, [
                     msg.solanaTxSig,
                     msg.solanaTxSigBytes32,
                     msg.amount,
-                    msg.teamFunds || 0,
                     msg.recipientEth,
                     msg.senderSolana,
                     msg.solanaBlockTime,
@@ -541,9 +565,9 @@ class Database {
                 ]);
             }
             
-            await client.query('COMMIT');
+            await client.commit();
         } catch (error) {
-            await client.query('ROLLBACK');
+            await client.rollback();
             throw error;
         } finally {
             client.release();
@@ -559,11 +583,10 @@ class Database {
         const query = `
             DELETE FROM cross_chain_messages 
             WHERE status = 'completed' 
-              AND processed_at < NOW() - INTERVAL '1 day' * $1
-            RETURNING id
+              AND processed_at < DATE_SUB(NOW(), INTERVAL ? DAY)
         `;
-        const result = await this.pool.query(query, [daysToKeep]);
-        return result.rows.length;
+        const result = await this._query(query, [daysToKeep]);
+        return result.affectedRows || 0;
     }
 }
 

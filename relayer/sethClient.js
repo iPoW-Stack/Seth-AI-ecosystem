@@ -58,6 +58,9 @@ class SethClient {
         } else {
             this.proxy = null;
         }
+
+        /** Axios timeout for Seth HTTP (query_account, query_contract, receipt, etc.) */
+        this.httpTimeoutMs = parseInt(process.env.SETH_HTTP_TIMEOUT_MS || '30000', 10);
     }
 
     /**
@@ -102,7 +105,7 @@ class SethClient {
 
             const axiosConfig = {
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                timeout: 10000,
+                timeout: this.httpTimeoutMs,
             };
             if (this.proxy) {
                 axiosConfig.proxy = this.proxy;
@@ -139,7 +142,7 @@ class SethClient {
 
             const axiosConfig = {
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                timeout: 10000,
+                timeout: this.httpTimeoutMs,
             };
             // if (this.proxy) {
             //     axiosConfig.proxy = this.proxy;
@@ -168,6 +171,16 @@ class SethClient {
      * Query transaction receipt
      * Note: Referencing cli.py, directly send hex string, not bytes
      */
+    _normalizeReceiptStatus(status) {
+        if (typeof status !== 'number' || !Number.isFinite(status)) return null;
+        // Seth newer interface maps legacy statuses with +10000 prefix:
+        // 10003 -> 3, 10005 -> 5, 100010 -> 10.
+        if (status === 10003 || status === 10005 || status === 100010) {
+            return status % 10000;
+        }
+        return status;
+    }
+
     async getTxReceipt(txHash) {
         try {
             // Remove 0x prefix 
@@ -179,7 +192,7 @@ class SethClient {
 
             const axiosConfig = {
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                timeout: 10000,
+                timeout: this.httpTimeoutMs,
             };
             if (this.proxy) {
                 axiosConfig.proxy = this.proxy;
@@ -193,10 +206,11 @@ class SethClient {
 
             // Referencing Seth official cli.py: returns JSON, contains status field (MessageHandleStatus)
             const data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
-            const status = typeof data.status === 'number' ? data.status : null;
+            const status = this._normalizeReceiptStatus(data.status);
 
-            // Consistent with Python version: kMessageHandle(1), kTxAccept(3) treated as "in progress"
-            const IN_PROGRESS = new Set([1, 3]);
+            // Consistent with Python version: kMessageHandle(1), kTxAccept(3) treated as "in progress".
+            // Status 10 is returned before the tx is indexed; keep polling (do not treat as terminal).
+            const IN_PROGRESS = new Set([1, 3, 10]);
 
             return {
                 raw: data,
@@ -289,7 +303,7 @@ class SethClient {
         const normalizedTo = normalizeToAddress(txParams.to);
 
         // --- 2. Get and Increment Nonce ---
-        // 重要: 根据 cli.py，当 step=8 (合约调用) 时，获取 nonce 的地址需要是 "to + myAddress"
+        // Important: per cli.py, when step=8 (contract call), nonce query address is "to + myAddress"
         let nonceQueryAddress = myAddressHex;
         if (txParams.step === 8 && normalizedTo) {
             console.log("txParams.to: ", normalizedTo);
@@ -353,7 +367,7 @@ class SethClient {
 
             const res = await axios.post(this.txUrl, formData, {
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                timeout: 30000
+                timeout: Math.max(this.httpTimeoutMs, 30000)
             });
             return res;
         };
@@ -432,7 +446,7 @@ class SethClient {
 
             const axiosConfig = {
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                timeout: 10000,
+                timeout: this.httpTimeoutMs,
             };
             if (this.proxy) {
                 axiosConfig.proxy = this.proxy;
@@ -458,12 +472,256 @@ class SethClient {
         return this.sendTransaction(privateKeyHex, {
             to: contractAddress,
             input: inputData,
-            step: 8, // Contract execution (参照 cli.py step=8)
+            step: 8, // Contract execution (per cli.py step=8)
             amount: options.amount || 0,
-            gas_limit: options.gasLimit || 200000,
+            gas_limit: options.gasLimit || 2000000000000,
             gas_price: options.gasPrice || 1,
             ...options
         });
+    }
+    
+    _functionSelector(signature) {
+        return createKeccakHash('keccak256').update(signature).digest('hex').slice(0, 8);
+    }
+
+    /**
+     * Seth query_contract may return HTTP 200 with plain-text errors like
+     * "get contract addr failed: ..." — never treat that as ABI hex.
+     */
+    _isValidAbiHexWordSlice(hex, offset, length = 64) {
+        if (!hex || offset < 0 || hex.length < offset + length) return false;
+        const slice = hex.slice(offset, offset + length);
+        return slice.length === length && /^[0-9a-f]+$/i.test(slice);
+    }
+
+    _extractHexOutput(queryResult) {
+        if (queryResult == null) return '';
+        if (typeof queryResult === 'string') {
+            try {
+                const parsed = JSON.parse(queryResult);
+                return this._extractHexOutput(parsed);
+            } catch {
+                const raw = String(queryResult).trim();
+                const hex = raw.replace(/^0x/i, '');
+                if (!/^[0-9a-f]+$/i.test(hex)) return '';
+                if (hex.length % 2 !== 0) return '';
+                return hex;
+            }
+        }
+        if (typeof queryResult === 'object') {
+            const candidates = [queryResult.output, queryResult.result, queryResult.data, queryResult.value];
+            for (const c of candidates) {
+                if (typeof c === 'string' && c.length > 0) {
+                    const h = c.replace(/^0x/i, '');
+                    if (!/^[0-9a-f]+$/i.test(h)) continue;
+                    if (h.length % 2 !== 0) continue;
+                    return h;
+                }
+            }
+        }
+        return '';
+    }
+
+    _decodeUint256(hex, wordIndex = 0) {
+        const offset = wordIndex * 64;
+        if (!this._isValidAbiHexWordSlice(hex, offset, 64)) return 0n;
+        try {
+            return BigInt('0x' + hex.slice(offset, offset + 64));
+        } catch {
+            return 0n;
+        }
+    }
+
+    _decodeAddress(hex, wordIndex = 0) {
+        const offset = wordIndex * 64;
+        if (!this._isValidAbiHexWordSlice(hex, offset, 64)) {
+            return '0x0000000000000000000000000000000000000000';
+        }
+        return '0x' + hex.slice(offset + 24, offset + 64);
+    }
+
+    _decodeBytes32(hex, wordIndex = 0) {
+        const offset = wordIndex * 64;
+        if (!this._isValidAbiHexWordSlice(hex, offset, 64)) {
+            return '0x' + '0'.repeat(64);
+        }
+        return '0x' + hex.slice(offset, offset + 64);
+    }
+
+    async getTotalWithdrawRequests(fromHex, contractAddress) {
+        const input = this._functionSelector('totalWithdrawRequests()');
+        const res = await this.queryContract(fromHex, contractAddress, input);
+        const out = this._extractHexOutput(res);
+        if (!out || out.length < 64) return 0;
+        return Number(this._decodeUint256(out, 0));
+    }
+
+    async getWithdrawRequest(fromHex, contractAddress, requestId) {
+        const arg = BigInt(requestId).toString(16).padStart(64, '0');
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const qWord = async (signature, attempts = 3) => {
+            const input = this._functionSelector(signature) + arg;
+            for (let i = 0; i < attempts; i++) {
+                const res = await this.queryContract(fromHex, contractAddress, input);
+                const out = this._extractHexOutput(res);
+                if (out && out.length >= 64) return out;
+                if (i < attempts - 1) await sleep(200 * (i + 1));
+            }
+            return null;
+        };
+
+        const decodeBoolWord = (w) => this._decodeUint256(w, 0) !== 0n;
+
+        // New preferred lock-style getters (Seth side aligned with Solana lock semantics).
+        const [lUserW, lRecipW, lAmountW, lCreatedW, lProcessedW] = await Promise.all([
+            qWord('lockRequestUser(uint256)'),
+            qWord('lockRequestSolanaRecipient(uint256)'),
+            qWord('lockRequestSusdcAmount(uint256)'),
+            qWord('lockRequestCreatedAt(uint256)'),
+            qWord('lockRequestProcessed(uint256)'),
+        ]);
+
+        if (lUserW && lRecipW && lAmountW && lCreatedW && lProcessedW) {
+            return {
+                user: this._decodeAddress(lUserW, 0),
+                solanaRecipient: this._decodeBytes32(lRecipW, 0),
+                susdcAmount: this._decodeUint256(lAmountW, 0).toString(),
+                createdAt: Number(this._decodeUint256(lCreatedW, 0)),
+                processed: decodeBoolWord(lProcessedW),
+            };
+        }
+
+        // Prefer single-word getters to avoid multi-return query instability on Seth nodes.
+        const [userW, recipW, amountW, createdW, processedW] = await Promise.all([
+            qWord('withdrawRequestUser(uint256)'),
+            qWord('withdrawRequestSolanaRecipient(uint256)'),
+            qWord('withdrawRequestSusdcAmount(uint256)'),
+            qWord('withdrawRequestCreatedAt(uint256)'),
+            qWord('withdrawRequestProcessed(uint256)'),
+        ]);
+
+        if (userW && recipW && amountW && createdW && processedW) {
+            return {
+                user: this._decodeAddress(userW, 0),
+                solanaRecipient: this._decodeBytes32(recipW, 0),
+                susdcAmount: this._decodeUint256(amountW, 0).toString(),
+                createdAt: Number(this._decodeUint256(createdW, 0)),
+                processed: decodeBoolWord(processedW),
+            };
+        }
+
+        // Backward compatibility: older bridge contracts only expose tuple getter.
+        const selector = this._functionSelector('getWithdrawRequest(uint256)');
+        const input = selector + arg;
+        const res = await this.queryContract(fromHex, contractAddress, input);
+        const out = this._extractHexOutput(res);
+        // (address, bytes32, uint256, uint256, bool) — 5 ABI words
+        if (!out || out.length < 5 * 64) return null;
+
+        return {
+            user: this._decodeAddress(out, 0),
+            solanaRecipient: this._decodeBytes32(out, 1),
+            susdcAmount: this._decodeUint256(out, 2).toString(),
+            createdAt: Number(this._decodeUint256(out, 3)),
+            processed: this._decodeUint256(out, 4) !== 0n,
+        };
+    }
+
+    async getWithdrawRequestKey(fromHex, contractAddress, requestId) {
+        const arg = BigInt(requestId).toString(16).padStart(64, '0');
+        const q = async (signature) => {
+            const input = this._functionSelector(signature) + arg;
+            const res = await this.queryContract(fromHex, contractAddress, input);
+            const out = this._extractHexOutput(res);
+            if (!out || out.length < 64) return null;
+            return '0x' + out.slice(0, 64);
+        };
+        // Prefer lock naming; fallback to withdraw naming.
+        return (await q('lockRequestKey(uint256)')) || (await q('withdrawRequestKey(uint256)'));
+    }
+
+    /**
+     * SethBridge aggregate view (Seth query_contract often fails on tuple returns from getBridgeState()).
+     * Uses single-word getters + account balance for native SETH on the bridge contract.
+     */
+    async getBridgeState(fromHex, contractAddress) {
+        const ca = String(contractAddress).replace(/^0x/i, '');
+        const q = async (sig) => {
+            const res = await this.queryContract(fromHex, ca, this._functionSelector(sig));
+            const out = this._extractHexOutput(res);
+            if (!out || out.length < 64) return null;
+            return this._decodeUint256(out, 0);
+        };
+        const [inj, nTx] = await Promise.all([
+            q('totalInjectedToPoolB()'),
+            q('totalTransactions()'),
+        ]);
+        if (inj == null || nTx == null) return null;
+        let nativeBalance = '0';
+        try {
+            nativeBalance = String(await this.getBalance(ca));
+        } catch {
+            nativeBalance = '0';
+        }
+        return {
+            totalInjectedToPoolB: inj.toString(),
+            totalTransactions: nTx.toString(),
+            nativeBalance,
+        };
+    }
+
+    /**
+     * SethBridge.poolB() -> address
+     */
+    async getPoolBAddress(fromHex, contractAddress) {
+        const input = this._functionSelector('poolB()');
+        const res = await this.queryContract(fromHex, contractAddress, input);
+        const out = this._extractHexOutput(res);
+        if (!out || out.length < 64) return null;
+        return this._decodeAddress(out, 0);
+    }
+
+    /**
+     * SethBridge.processedTxs(bytes32) -> bool
+     */
+    async getProcessedTx(fromHex, contractAddress, txSigBytes32Hex) {
+        const selector = this._functionSelector('processedTxs(bytes32)');
+        const arg = String(txSigBytes32Hex || '')
+            .replace(/^0x/i, '')
+            .padStart(64, '0')
+            .slice(0, 64);
+        const input = selector + arg;
+        const res = await this.queryContract(fromHex, contractAddress, input);
+        const out = this._extractHexOutput(res);
+        if (!out || out.length < 64) return null;
+        return this._decodeUint256(out, 0) !== 0n;
+    }
+
+    /** PoolB.reserveSETH() */
+    async getPoolReserveSETH(fromHex, poolAddress) {
+        const input = this._functionSelector('reserveSETH()');
+        const res = await this.queryContract(fromHex, poolAddress, input);
+        const out = this._extractHexOutput(res);
+        if (!out || out.length < 64) return null;
+        return this._decodeUint256(out, 0).toString();
+    }
+
+    /** PoolB.reservesUSDC() */
+    async getPoolReservesUSDC(fromHex, poolAddress) {
+        const input = this._functionSelector('reservesUSDC()');
+        const res = await this.queryContract(fromHex, poolAddress, input);
+        const out = this._extractHexOutput(res);
+        if (!out || out.length < 64) return null;
+        return this._decodeUint256(out, 0).toString();
+    }
+
+    /** PoolB.getPrice() — sUSDC raw per 1 SETH (integer ratio from reserves) */
+    async getPoolPrice(fromHex, poolAddress) {
+        const input = this._functionSelector('getPrice()');
+        const res = await this.queryContract(fromHex, poolAddress, input);
+        const out = this._extractHexOutput(res);
+        if (!out || out.length < 64) return null;
+        return this._decodeUint256(out, 0).toString();
     }
 
     /**

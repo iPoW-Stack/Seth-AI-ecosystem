@@ -101,6 +101,8 @@ cp .env.example .env
 
 ### 3. Initialize Database
 
+Use a **new** PostgreSQL database (empty schema). There are no migration scripts; `init.sql` is the full schema.
+
 ```bash
 # Create database
 createdb -U postgres bridge_relayer

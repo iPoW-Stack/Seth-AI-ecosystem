@@ -1,4 +1,4 @@
-//! 错误定义模块
+//! Error definitions
 
 use anchor_lang::prelude::*;
 

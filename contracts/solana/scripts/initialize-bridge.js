@@ -1,6 +1,7 @@
 /**
- * Solana 桥接合约初始化脚本（不依赖 Anchor Program）
- * 用法: node scripts/initialize-bridge.js
+ * Solana bridge initialization script (without Anchor Program client)
+ * Usage: node scripts/initialize-bridge.js
+ * Env vars: PROGRAM_ID, RPC_URL (optional)
  */
 
 const {
@@ -16,7 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-// 配置
+// Configuration
 const CONFIG = {
   rpcUrl: process.env.RPC_URL || 'https://devnet.helius-rpc.com/?api-key=453899d1-2296-4503-b3df-fcc3c64436bc',
   keypairPath: path.resolve(__dirname, '../deployer-keypair.json'),
@@ -27,22 +28,22 @@ const CONFIG = {
       const d = JSON.parse(fs.readFileSync(infoPath, 'utf-8'));
       return d.programId;
     }
-    return '125eQs1s3SNxd5KFRpAJ6JvtVpD4tRYw6fWKomibQ8tc';
+    return 'GmfLWKJuTgyaNvro91Vd8mwg8BXccgXS3jZ4WTjsAan5';
   })(),
 
-  // 钱包地址（替换为实际地址）
+  // Wallet addresses (replace with real addresses)
   // teamWallet: process.env.TEAM_WALLET || '0a1020ab518d03a0106964683eb1da2de0c27430',
   teamWallet: 'Ax4XoKH8YKmsKqZzz5E5rfeXZmuBrANHT4C4Z5C6wQ6w',
   // projectWallet: process.env.PROJECT_WALLET || '69ARjWMWFgpnH71N1Cogr3BR5VBy7fsT4sMgAKFqRj4j',
   projectWallet: 'Ax4XoKH8YKmsKqZzz5E5rfeXZmuBrANHT4C4Z5C6wQ6w',
-  // Seth Treasury 地址 (以太坊格式，20字节)
+  // Seth Treasury address (Ethereum format, 20 bytes)
   sethTreasury: process.env.SETH_TREASURY || '0x77a3deed600bb37d8fcbe2167bfb1a6e47a16b4f',
 
-  // USDC Mint (devnet)
-  usdcMint: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU', // Devnet USDC
+  // Bridge vault token mint (fixed to Solana USDC on devnet).
+  usdcMint: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
 };
 
-// 颜色输出
+// Colored output
 const colors = {
   green: '\x1b[32m',
   yellow: '\x1b[33m',
@@ -55,34 +56,35 @@ function log(message, color = 'reset') {
   console.log(`${colors[color]}${message}${colors.reset}`);
 }
 
-// 计算 Anchor 全局函数 sighash
+// Compute Anchor global function sighash
 function sighash(name) {
-  // 对 "global:initialize" 做 sha256，取前 8 字节
+  // sha256("global:initialize"), first 8 bytes
   return crypto.createHash('sha256').update(`global:${name}`).digest().slice(0, 8);
 }
 
 async function main() {
-  log('\n=== Solana 桥接合约初始化 ===\n', 'cyan');
+  log('\n=== Solana Bridge Initialization ===\n', 'cyan');
   log(`RPC: ${CONFIG.rpcUrl}`, 'cyan');
   log(`Program ID: ${CONFIG.programId}`, 'cyan');
+  log(`Bridge Vault Mint: ${CONFIG.usdcMint}`, 'cyan');
 
-  // 1. 加载 keypair
-  log('\n1. 加载 Keypair...', 'yellow');
+  // 1. Load keypair
+  log('\n1. Loading keypair...', 'yellow');
   const keypairData = JSON.parse(fs.readFileSync(CONFIG.keypairPath, 'utf-8'));
   const keypair = Keypair.fromSecretKey(Uint8Array.from(keypairData));
   log(`  Deployer: ${keypair.publicKey.toBase58()}`);
 
-  // 2. 创建连接
-  log('\n2. 创建连接...', 'yellow');
+  // 2. Create connection
+  log('\n2. Creating connection...', 'yellow');
   const connection = new Connection(CONFIG.rpcUrl, {
     commitment: 'confirmed',
   });
   
   const balance = await connection.getBalance(keypair.publicKey);
-  log(`  余额: ${balance / 1e9} SOL`);
+  log(`  Balance: ${balance / 1e9} SOL`);
 
-  // 3. 计算 programId
-  log('\n3. 准备 Program 与 PDA...', 'yellow');
+  // 3. Prepare Program and PDAs
+  log('\n3. Preparing Program and PDAs...', 'yellow');
   const programId = new PublicKey(CONFIG.programId);
   
   const [configPda] = PublicKey.findProgramAddressSync(
@@ -97,23 +99,23 @@ async function main() {
   );
   log(`  Vault Authority PDA: ${vaultAuthorityPda.toBase58()}`);
 
-  // 5. 检查是否已初始化
-  log('\n5. 检查初始化状态...', 'yellow');
+  // 5. Check initialization state
+  log('\n5. Checking initialization state...', 'yellow');
   try {
     const info = await connection.getAccountInfo(configPda);
     if (info && info.owner && info.owner.equals(programId)) {
-      log('  合约已初始化!（config 账户已存在）', 'green');
+      log('  Program already initialized (config account exists).', 'green');
       return;
     }
   } catch (e) {
     // ignore
   }
-  log('  合约未初始化，继续...', 'yellow');
+  log('  Not initialized yet, continue...', 'yellow');
 
-  // 6. 构建初始化交易
-  log('\n6. 构建初始化交易...', 'yellow');
+  // 6. Build initialization transaction
+  log('\n6. Building initialization transaction...', 'yellow');
   
-  // Seth treasury: Ethereum 地址 20 字节，左填充 0 转为 32 字节 Pubkey
+  // Seth treasury: 20-byte Ethereum address, left-padded to 32-byte Pubkey
   const sethTreasuryBytes = Buffer.alloc(32);
   const sethTreasuryHex = CONFIG.sethTreasury.replace('0x', '');
   Buffer.from(sethTreasuryHex, 'hex').copy(sethTreasuryBytes, 12);
@@ -121,10 +123,10 @@ async function main() {
   
   const teamWallet = new PublicKey(CONFIG.teamWallet);
   const projectWallet = new PublicKey(CONFIG.projectWallet);
-  const usdcMint = new PublicKey(CONFIG.usdcMint);
+  const vaultMint = new PublicKey(CONFIG.usdcMint);
   
   try {
-    // 获取 vault token account 地址 (PDA, 与 bridge 合约 seeds 一致)
+    // Derive vault token account address (PDA, aligned with bridge seeds)
     const [vaultTokenAccount] = PublicKey.findProgramAddressSync(
       [Buffer.from('vault_token_account')],
       programId
@@ -134,13 +136,13 @@ async function main() {
     
     log(`  Vault Token Account: ${vaultTokenAccount.toBase58()}`);
     
-    // 构造 instruction data：8 字节 sighash + 32 字节 sethTreasury Pubkey
+    // Build instruction data: 8-byte sighash + 32-byte sethTreasury Pubkey
     const data = Buffer.concat([
       sighash('initialize'),
       sethTreasuryPubkey.toBuffer(),
     ]);
 
-    // 按 Initialize<'info> 的账户顺序填 keys
+    // Fill account keys in Initialize<'info> order
     const keys = [
       { pubkey: keypair.publicKey,      isSigner: true,  isWritable: true },  // owner
       { pubkey: teamWallet,             isSigner: false, isWritable: false }, // team_wallet
@@ -148,7 +150,7 @@ async function main() {
       { pubkey: configPda,              isSigner: false, isWritable: true },  // config (init)
       { pubkey: vaultAuthorityPda,      isSigner: false, isWritable: true },  // vault_authority (init)
       { pubkey: vaultTokenAccount,      isSigner: false, isWritable: true },  // vault_token_account (init)
-      { pubkey: usdcMint,               isSigner: false, isWritable: false }, // usdc_mint
+      { pubkey: vaultMint,              isSigner: false, isWritable: false }, // usdc_mint
       { pubkey: SystemProgram.programId,isSigner: false, isWritable: false }, // system_program
       { pubkey: TOKEN_PROGRAM_ID,       isSigner: false, isWritable: false }, // token_program
       { pubkey: SYSVAR_RENT_PUBKEY,     isSigner: false, isWritable: false }, // rent
@@ -166,36 +168,36 @@ async function main() {
     });
     await connection.confirmTransaction(sig, 'confirmed');
     
-    log(`  交易: ${sig}`, 'green');
-    log('  初始化成功!', 'green');
+    log(`  Signature: ${sig}`, 'green');
+    log('  Initialization succeeded.', 'green');
     
   } catch (e) {
-    log(`  初始化失败: ${e.message}`, 'red');
+    log(`  Initialization failed: ${e.message}`, 'red');
     console.error(e);
     
-    // 如果是 spl-token 未安装，提示手动初始化
+    // If spl-token is missing, provide install hint
     if (e.message.includes('Cannot find module')) {
-      log('\n请安装依赖: npm install @solana/spl-token', 'yellow');
+      log('\nInstall dependency: npm install @solana/spl-token', 'yellow');
     }
   }
 
-  // 7. 验证初始化
-  log('\n7. 验证初始化...', 'yellow');
+  // 7. Verify initialization
+  log('\n7. Verifying initialization...', 'yellow');
   try {
     const info = await connection.getAccountInfo(configPda);
     if (info && info.owner && info.owner.equals(programId)) {
-      log('  初始化验证成功!（config 账户已存在）', 'green');
+      log('  Verification succeeded (config account exists).', 'green');
       log(`  Config PDA: ${configPda.toBase58()}`);
       log(`  Vault Authority PDA: ${vaultAuthorityPda.toBase58()}`);
       return;
     }
-    log('  验证失败: config 账户不存在或 owner 不匹配', 'red');
+    log('  Verification failed: config missing or owner mismatch', 'red');
   } catch (e) {
-    log(`  验证失败: ${e.message}`, 'red');
+    log(`  Verification failed: ${e.message}`, 'red');
   }
 }
 
 main().catch(err => {
-  console.error('初始化失败:', err);
+  console.error('Initialization failed:', err);
   process.exit(1);
 });

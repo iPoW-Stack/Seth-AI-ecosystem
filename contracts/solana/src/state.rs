@@ -42,9 +42,6 @@ pub struct Config {
     
     // ===== Pending Settlement Funds =====
     
-    /// Pending team incentive
-    pub pending_team_funds: u64,
-    
     /// Pending project reserve
     pub pending_project_funds: u64,
     
@@ -112,9 +109,6 @@ pub struct CrossChainMessage {
     /// Cross-chain amount (ecosystem funds 30%)
     pub amount: u64,
     
-    /// Team funds (5%) - for cross-chain to TeamPayroll
-    pub team_funds: u64,
-    
     /// Seth chain recipient address
     pub seth_recipient: [u8; 20],
     
@@ -128,9 +122,6 @@ pub struct CrossChainMessage {
     
     /// Project funds (50%) - already distributed locally
     pub project_funds: u64,
-    
-    /// Product type
-    pub product_type: u8,
     
     /// L1 referrer
     pub l1_referrer: Option<Pubkey>,
@@ -147,6 +138,24 @@ pub struct CrossChainMessage {
     /// Created timestamp
     pub created_at: i64,
     
+    /// Processed timestamp
+    pub processed_at: i64,
+}
+
+/// Seth -> Solana unlock receipt (replay protection)
+#[account]
+#[derive(InitSpace)]
+pub struct SethUnlockReceipt {
+    /// Seth bridge address (20-byte EVM address)
+    pub bridge_address: [u8; 20],
+    /// Seth withdraw request id
+    pub request_id: u64,
+    /// Recipient on Solana
+    pub recipient: Pubkey,
+    /// Unlocked USDC amount
+    pub amount: u64,
+    /// Seth side tx hash / request hash
+    pub seth_tx_hash: [u8; 32],
     /// Processed timestamp
     pub processed_at: i64,
 }

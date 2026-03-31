@@ -6,13 +6,11 @@
     "build": "anchor build",
     "deploy": "anchor deploy",
     "test": "anchor test",
-    "deploy:full": "node scripts/deploy.js",
-    "init": "node scripts/initialize.js",
-    "dirm:create": "node scripts/create-dirm.js",
-    "susdc:create": "node scripts/create-susdc.js",
+    "deploy:devnet": "node scripts/deploy-devnet.js",
+    "deploy:devnet:init": "node scripts/deploy-devnet.js --init",
+    "deploy:full": "node scripts/deploy-devnet.js --init",
     "bridge:init": "node scripts/initialize-bridge.js",
     "pool:init": "node scripts/initialize-pool.js",
-    "deploy:all": "node scripts/deploy-all.js",
     "clean": "rm -rf target node_modules"
   },
   "dependencies": {

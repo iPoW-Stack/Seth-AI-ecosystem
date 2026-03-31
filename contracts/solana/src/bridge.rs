@@ -3,9 +3,9 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
-use crate::{Config, VaultAuthority, UserInfo, CrossChainMessage, CrossChainStatus};
+use crate::{Config, VaultAuthority, UserInfo, CrossChainMessage, CrossChainStatus, SethUnlockReceipt};
 use crate::{BridgeError};
-use crate::{ReferrerSet, CrossChainCompleted, RelayerUpdated};
+use crate::{ReferrerSet, CrossChainCompleted, RelayerUpdated, SethUnlockProcessed};
 
 // ==================== Initialization ====================
 
@@ -74,7 +74,6 @@ pub fn handle_initialize(ctx: Context<Initialize>, seth_treasury: Pubkey) -> Res
     config.total_revenue = 0;
     config.total_commission_distributed = 0;
     config.total_ecosystem_transferred = 0;
-    config.pending_team_funds = 0;
     config.pending_project_funds = 0;
     config.last_settlement_timestamp = Clock::get()?.unix_timestamp;
     Ok(())
@@ -261,6 +260,94 @@ pub fn handle_mark_cross_chain_completed(
         timestamp: Clock::get()?.unix_timestamp,
     });
 
+    Ok(())
+}
+
+/// Relayer unlocks sUSDC on Solana for Seth->Solana bridge-back
+#[derive(Accounts)]
+#[instruction(bridge_address: [u8; 20], request_id: u64)]
+pub struct UnlockFromSeth<'info> {
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+    
+    #[account(
+        seeds = [b"config"],
+        bump
+    )]
+    pub config: Account<'info, Config>,
+    
+    #[account(
+        mut,
+        seeds = [b"vault_token_account"],
+        bump
+    )]
+    pub vault_token_account: Account<'info, TokenAccount>,
+    
+    #[account(
+        seeds = [b"vault_authority"],
+        bump
+    )]
+    pub vault_authority: Account<'info, VaultAuthority>,
+    
+    /// Recipient sUSDC token account on Solana
+    #[account(mut)]
+    pub recipient_token_account: Account<'info, TokenAccount>,
+    
+    #[account(
+        init,
+        payer = relayer,
+        space = 8 + SethUnlockReceipt::INIT_SPACE,
+        seeds = [b"seth_unlock", bridge_address.as_ref(), request_id.to_le_bytes().as_ref()],
+        bump
+    )]
+    pub unlock_receipt: Account<'info, SethUnlockReceipt>,
+    
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+pub fn handle_unlock_from_seth(
+    ctx: Context<UnlockFromSeth>,
+    bridge_address: [u8; 20],
+    request_id: u64,
+    amount: u64,
+    seth_tx_hash: [u8; 32],
+) -> Result<()> {
+    require!(
+        ctx.accounts.relayer.key() == ctx.accounts.config.relayer,
+        BridgeError::Unauthorized
+    );
+    require!(amount > 0, BridgeError::ZeroAmount);
+    require!(
+        ctx.accounts.recipient_token_account.mint == ctx.accounts.vault_token_account.mint,
+        BridgeError::InvalidAccount
+    );
+    
+    transfer_from_vault(
+        &ctx.accounts.vault_token_account.to_account_info(),
+        &ctx.accounts.recipient_token_account.to_account_info(),
+        &ctx.accounts.vault_authority.to_account_info(),
+        &ctx.accounts.token_program.to_account_info(),
+        amount,
+        ctx.accounts.config.bump,
+    )?;
+    
+    let receipt = &mut ctx.accounts.unlock_receipt;
+    receipt.bridge_address = bridge_address;
+    receipt.request_id = request_id;
+    receipt.recipient = ctx.accounts.recipient_token_account.owner;
+    receipt.amount = amount;
+    receipt.seth_tx_hash = seth_tx_hash;
+    receipt.processed_at = Clock::get()?.unix_timestamp;
+    
+    emit!(SethUnlockProcessed {
+        request_id,
+        recipient: ctx.accounts.recipient_token_account.owner,
+        amount,
+        seth_tx_hash,
+        timestamp: Clock::get()?.unix_timestamp,
+    });
+    
     Ok(())
 }
 

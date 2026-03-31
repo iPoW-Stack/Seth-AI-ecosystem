@@ -1,0 +1,8 @@
+# Seth deploy deps (deploy_seth.py)
+pycryptodome>=3.19.0
+eth-abi>=4.2.0
+eth-utils>=2.3.0
+py-solc-x>=2.0.0
+requests>=2.31.0
+ecdsa>=0.18.0
+psycopg2-binary>=2.9.9

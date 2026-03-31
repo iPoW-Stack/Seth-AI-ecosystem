@@ -9,6 +9,8 @@ pragma solidity ^0.8.20;
  *      1. Receiving cross-chain funds (sUSDC minted via SethBridge)
  *      2. Managing funds
  *      3. Optional: inject to PoolB to support SETH price
+ *      4. Seth→Solana withdraw is now handled by SethBridge directly calling PoolB.sellSETH.
+ *         `swapSethForSusdc` is kept as a legacy bridge-only function for backward compatibility.
  */
 contract Treasury {
     // ==================== Ownable Functionality (Inlined) ====================
@@ -74,11 +76,18 @@ contract Treasury {
     
     event RelayerUpdated(address oldRelayer, address newRelayer);
     event PoolBUpdated(address oldPoolB, address newPoolB);
+    event SethSwappedForBridgeWithdraw(uint256 amountSETH, uint256 amountSUSDC);
 
     // ==================== Modifiers ====================
     
     modifier onlyRelayer() {
         require(msg.sender == trustedRelayer, "Treasury: Not trusted relayer");
+        _;
+    }
+
+    modifier onlyBridge() {
+        require(bridgeContract != address(0), "Treasury: Bridge not set");
+        require(msg.sender == bridgeContract, "Treasury: Not bridge");
         _;
     }
 
@@ -112,6 +121,81 @@ contract Treasury {
     
     function setBridgeContract(address _bridgeContract) external onlyOwner {
         bridgeContract = _bridgeContract;
+    }
+
+    /**
+     * @dev After deploy, PoolB Ownable owner is this Treasury. Updates PoolB.treasury (LP / addLiquidity caller).
+     */
+    function setPoolBTreasury(address _newTreasury) external onlyOwner {
+        require(poolB != address(0), "Treasury: PoolB not set");
+        (bool ok, ) = poolB.call(
+            abi.encodeWithSignature("setTreasury(address)", _newTreasury)
+        );
+        require(ok, "Treasury: PoolB setTreasury failed");
+    }
+
+    /**
+     * @dev SethBridge mints sUSDC, transfers to this contract, then calls here with native SETH.
+     *      PoolB.treasury must be this contract. Relayer -> SethBridge -> Treasury -> PoolB.
+     */
+    function injectFromBridge(uint256 amountSUSDC, uint256 amountSETH) external payable onlyBridge {
+        require(poolB != address(0), "Treasury: PoolB not set");
+        require(amountSUSDC > 0 || amountSETH > 0, "Treasury: Zero amounts");
+        require(msg.value >= amountSETH, "Treasury: Insufficient native SETH sent");
+
+        if (amountSUSDC > 0) {
+            _approve(susdcToken, poolB, amountSUSDC);
+        }
+        (bool success, ) = poolB.call{value: amountSETH}(
+            abi.encodeWithSignature("addLiquidity(uint256)", amountSUSDC)
+        );
+        require(success, "Treasury: Failed to add liquidity");
+
+        totalInjectedToPoolB += amountSUSDC;
+        emit FundsInjectedToPoolB(amountSUSDC, amountSETH, block.timestamp);
+    }
+
+    /**
+     * @notice Quote sUSDC out for a SETH amount (same math as PoolB.sellSETH). For UI / minOut slippage.
+     */
+    function quoteSwapSethForSusdc(uint256 amountSETH) external view returns (uint256 susdcOut) {
+        if (poolB == address(0) || amountSETH == 0) return 0;
+        (bool okR, bytes memory rS) = poolB.staticcall(abi.encodeWithSignature("reserveSETH()"));
+        (bool okU, bytes memory rU) = poolB.staticcall(abi.encodeWithSignature("reservesUSDC()"));
+        if (!okR || !okU || rS.length < 32 || rU.length < 32) return 0;
+        uint256 reserveSETH = abi.decode(rS, (uint256));
+        uint256 reservesUSDC = abi.decode(rU, (uint256));
+        if (reserveSETH == 0 || reservesUSDC == 0) return 0;
+        (bool ok2, bytes memory out) = poolB.staticcall(
+            abi.encodeWithSignature(
+                "getAmountOut(uint256,uint256,uint256)",
+                amountSETH,
+                reserveSETH,
+                reservesUSDC
+            )
+        );
+        if (!ok2 || out.length == 0) return 0;
+        susdcOut = abi.decode(out, (uint256));
+    }
+
+    /**
+     * @dev Legacy bridge-only path (kept for compatibility).
+     *      Current primary Seth→Solana withdraw path calls PoolB directly from SethBridge.
+     */
+    function swapSethForSusdc(uint256 minSUSDCOut) external payable onlyBridge returns (uint256 amountOut) {
+        require(poolB != address(0), "Treasury: PoolB not set");
+        require(bridgeContract != address(0), "Treasury: Bridge not set");
+        require(msg.value > 0, "Treasury: Zero SETH");
+
+        (bool success, bytes memory ret) = poolB.call{value: msg.value}(
+            abi.encodeWithSignature("sellSETH(uint256)", minSUSDCOut)
+        );
+        require(success, "Treasury: Pool swap failed");
+        amountOut = abi.decode(ret, (uint256));
+        require(amountOut > 0, "Treasury: Zero sUSDC out");
+        require(_transferToken(susdcToken, bridgeContract, amountOut), "Treasury: sUSDC to bridge failed");
+
+        emit SethSwappedForBridgeWithdraw(msg.value, amountOut);
     }
 
     // ==================== Core Functions ====================
@@ -148,14 +232,13 @@ contract Treasury {
      */
     function injectToPoolB(uint256 amountSUSDC, uint256 amountSETH) external payable onlyOwner {
         require(poolB != address(0), "Treasury: PoolB not set");
-        require(amountSUSDC > 0, "Treasury: Zero sUSDC amount");
+        require(amountSUSDC > 0 || amountSETH > 0, "Treasury: Zero amounts");
         require(msg.value >= amountSETH, "Treasury: Insufficient native SETH sent");
-        require(amountSETH > 0, "Treasury: Zero SETH amount");
-        
-        // 1. Approve PoolB to use sUSDC
-        _approve(susdcToken, poolB, amountSUSDC);
-        
-        // 2. Add liquidity to PoolB (send native SETH)
+
+        if (amountSUSDC > 0) {
+            _approve(susdcToken, poolB, amountSUSDC);
+        }
+
         (bool success, ) = poolB.call{value: amountSETH}(
             abi.encodeWithSignature(
                 "addLiquidity(uint256)",
@@ -177,6 +260,13 @@ contract Treasury {
             abi.encodeWithSignature("approve(address,uint256)", spender, amount)
         );
         // Some tokens don't require approve return value
+    }
+
+    function _transferToken(address token, address to, uint256 amount) internal returns (bool) {
+        (bool success, bytes memory data) = token.call(
+            abi.encodeWithSignature("transfer(address,uint256)", to, amount)
+        );
+        return success && (data.length == 0 || abi.decode(data, (bool)));
     }
 
     // ==================== Query Functions ====================

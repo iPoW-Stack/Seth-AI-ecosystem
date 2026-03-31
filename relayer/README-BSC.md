@@ -121,7 +121,7 @@ npm run dev:bsc:v2   # V2
 | Rate Limiter | `RateLimiter` | Token bucket rate limiting |
 | Worker Pool | Worker Pool | Multi-worker concurrent processing |
 
-### High-Concurrency Configuration并发配置
+### High-Concurrency Configuration
 
 ```env
 # .env.bsc
@@ -284,7 +284,7 @@ V2 version has built-in Nonce Manager to automatically handle nonce conflicts. I
 
 ### 3. Queue Backlog
 
-If memory queue continues to grow：
+If memory queue continues to grow:
 - Increase `WORKER_COUNT`
 - Increase `TX_CONCURRENCY`
 - Check BSC network status

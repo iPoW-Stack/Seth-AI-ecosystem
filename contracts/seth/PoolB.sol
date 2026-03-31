@@ -110,13 +110,11 @@ contract PoolB {
     // ==================== Price Calculation ====================
 
     /**
-     * @dev Get current price (1 SETH = ? sUSDC)
-     * @return price SETH price (18 decimal precision)
+     * @dev sUSDC per 1 SETH: both sides use chain base units (sUSDC 6-decimal raw; SETH has no sub-units).
      */
     function getPrice() public view returns (uint256 price) {
         if (reserveSETH == 0) return 0;
-        // price = sUSDC reserve / SETH reserve
-        price = (reservesUSDC * 1e18) / reserveSETH;
+        price = reservesUSDC / reserveSETH;
     }
 
     /**
@@ -208,20 +206,21 @@ contract PoolB {
     // ==================== Liquidity Management ====================
 
     /**
-     * @dev Treasury adds liquidity - Send native SETH
-     * @param amountSUSDC sUSDC amount
+     * @dev Treasury adds liquidity — native SETH via msg.value, sUSDC via transferFrom.
+     *      Either leg may be zero; at least one must be non-zero.
      */
     function addLiquidity(uint256 amountSUSDC) external payable onlyTreasury {
         uint256 amountSETH = msg.value;
-        require(amountSETH > 0, "PoolB: Zero SETH amount");
-        require(amountSUSDC > 0, "PoolB: Zero sUSDC amount");
-        
-        require(_transferFrom(susdcToken, msg.sender, address(this), amountSUSDC), "PoolB: sUSDC transfer failed");
-        
-        // Native SETH already in contract via msg.value
-        reserveSETH += amountSETH;
-        reservesUSDC += amountSUSDC;
-        
+        require(amountSETH > 0 || amountSUSDC > 0, "PoolB: Zero liquidity");
+
+        if (amountSUSDC > 0) {
+            require(_transferFrom(susdcToken, msg.sender, address(this), amountSUSDC), "PoolB: sUSDC transfer failed");
+            reservesUSDC += amountSUSDC;
+        }
+        if (amountSETH > 0) {
+            reserveSETH += amountSETH;
+        }
+
         emit LiquidityAdded(amountSETH, amountSUSDC, reserveSETH, reservesUSDC);
     }
 

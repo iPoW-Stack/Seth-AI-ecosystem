@@ -1,0 +1,16 @@
+{
+  "name": "seth-contracts",
+  "version": "1.0.0",
+  "description": "Seth contract utilities",
+  "main": "deploy_seth.py",
+  "scripts": {
+    "inject-liquidity": "node inject-liquidity.js",
+    "test-native-transfer": "node seth-native-transfer.js",
+    "test-outbound-lock": "node test-outbound-lock.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "keccak": "^3.0.3",
+    "secp256k1": "^5.0.0"
+  }
+}

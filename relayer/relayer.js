@@ -6,13 +6,26 @@
  */
 
 require('dotenv').config();
-const { Connection, PublicKey } = require('@solana/web3.js');
+const { Connection, PublicKey, Keypair, Transaction, TransactionInstruction, SystemProgram } = require('@solana/web3.js');
+const { createAssociatedTokenAccountInstruction } = require('@solana/spl-token');
 const bs58 = require('bs58');
 const Database = require('./db/database');
 const SethClient = require('./sethClient');
 const { Buffer } = require('buffer');
 const createKeccakHash = require('keccak');
 const secp256k1 = require('secp256k1');
+const fs = require('fs');
+const crypto = require('crypto');
+
+/** Anchor `emit!(RevenueProcessed { ... })` — first 8 bytes of sha256("event:RevenueProcessed") */
+const REVENUE_PROCESSED_EVENT_DISCRIMINATOR = Buffer.from([
+    181, 26, 199, 237, 159, 186, 73, 241,
+]);
+const PROCESS_REVENUE_INSTRUCTION_DISCRIMINATOR = crypto
+    .createHash('sha256')
+    .update('global:process_revenue')
+    .digest()
+    .subarray(0, 8);
 
 // ==================== Configuration ====================
 const CONFIG = {
@@ -20,6 +33,8 @@ const CONFIG = {
     solana: {
         rpcUrl: process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com',
         programId: process.env.SOLANA_PROGRAM_ID,
+        relayerKeypairPath: process.env.SOLANA_RELAYER_KEYPAIR || '',
+        usdcMint: process.env.SOLANA_USDC_MINT || '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
         commitment: 'confirmed',
         pollInterval: parseInt(process.env.SOLANA_POLL_INTERVAL) || 5000,
         proxy: process.env.SOLANA_HTTP_PROXY || process.env.SOLANA_PROXY || null,
@@ -31,10 +46,12 @@ const CONFIG = {
         bridgeAddress: process.env.SETH_BRIDGE_ADDRESS,
         privateKey: process.env.RELAYER_PRIVATE_KEY,
         proxy: process.env.SETH_HTTP_PROXY || process.env.SETH_PROXY || null,
-        // Native SETH amount (wei) to inject to PoolB with ecosystem funds
-        // SethBridge.processCrossChainMessage requires amountSETH > 0 and msg.value >= amountSETH
-        // Default 1 wei is for testing only; configure a reasonable value for production
-        injectNativeWei: process.env.SETH_INJECT_NATIVE_WEI || '1',
+        // Native SETH to pair with ecosystem inject (integer; 1 = 1 SETH, no sub-units)
+        // SethBridge.processCrossChainMessageV2: msg.value must cover amountSETH
+        injectSethAmount:
+            process.env.SETH_INJECT_SETH || process.env.SETH_INJECT_NATIVE_WEI || '0',
+        reversePollInterval: parseInt(process.env.SETH_REVERSE_POLL_INTERVAL) || 15000,
+        enableReverseRelay: String(process.env.ENABLE_SETH_TO_SOLANA || 'false').toLowerCase() === 'true',
     },
     // Database Configuration
     database: {
@@ -63,10 +80,13 @@ class BridgeRelayer {
         this.solanaConn = null;
         this.sethClient = null;
         this.relayerAddress = null;
+        this.solanaRelayer = null;
         this.isRunning = false;
         this.isShuttingDown = false;
         this.retryTimer = null;
         this.pollTimer = null;
+        this.sethReverseTimer = null;
+        this.lastSeenWithdrawRequestId = 0;
         this.stats = {
             totalProcessed: 0,
             totalFailed: 0,
@@ -83,10 +103,7 @@ class BridgeRelayer {
         
         // 1. Initialize database
         this.db = new Database(CONFIG.database);
-        const dbConnected = await this.db.testConnection();
-        if (!dbConnected) {
-            throw new Error('Failed to connect to database');
-        }
+        await this.db.initialize();
 
         // 2. Initialize Solana connection (with proxy support)
         const connOptions = { commitment: CONFIG.solana.commitment };
@@ -96,6 +113,17 @@ class BridgeRelayer {
         }
         this.solanaConn = new Connection(CONFIG.solana.rpcUrl, connOptions);
         console.log('[Relayer] Solana connection established');
+        
+        if (CONFIG.solana.relayerKeypairPath) {
+            try {
+                const raw = fs.readFileSync(CONFIG.solana.relayerKeypairPath, 'utf8');
+                const secret = Uint8Array.from(JSON.parse(raw));
+                this.solanaRelayer = Keypair.fromSecretKey(secret);
+                console.log(`[Relayer] Solana relayer signer: ${this.solanaRelayer.publicKey.toBase58()}`);
+            } catch (e) {
+                console.warn(`[Relayer] Failed to load SOLANA_RELAYER_KEYPAIR: ${e.message}`);
+            }
+        }
 
         // 3. Initialize Seth client (with proxy support)
         this.sethClient = new SethClient(CONFIG.seth.host, CONFIG.seth.port, CONFIG.seth.proxy);
@@ -145,6 +173,9 @@ class BridgeRelayer {
 
         // Start retry scheduler
         this.startRetryScheduler();
+        
+        // Start Seth -> Solana reverse bridge polling
+        this.startSethReversePolling();
 
         // Start stats reporter
         this.startStatsReporter();
@@ -173,6 +204,10 @@ class BridgeRelayer {
             clearInterval(this.pollTimer);
             this.pollTimer = null;
         }
+        if (this.sethReverseTimer) {
+            clearInterval(this.sethReverseTimer);
+            this.sethReverseTimer = null;
+        }
 
         await this.db.setRelayerActive(false);
         console.log('[Relayer] Stopped');
@@ -189,6 +224,268 @@ class BridgeRelayer {
     }
 
     // ==================== Solana Listener ====================
+
+    /**
+     * Start Seth -> Solana reverse bridge polling
+     */
+    startSethReversePolling() {
+        this.sethReverseTimer = setInterval(async () => {
+            if (this.isShuttingDown) return;
+            await this.pollSethWithdrawRequests();
+        }, CONFIG.seth.reversePollInterval);
+        console.log('[Relayer] Seth reverse polling started');
+    }
+
+    /**
+     * Poll SethBridge withdraw requests.
+     * This is the entry for reverse bridge (SETH sUSDC -> Solana USDC).
+     */
+    async pollSethWithdrawRequests() {
+        try {
+            const total = await this.sethClient.getTotalWithdrawRequests(
+                this.relayerAddress,
+                CONFIG.seth.bridgeAddress
+            );
+            if (!Number.isFinite(total) || total <= this.lastSeenWithdrawRequestId) return;
+            
+            for (let requestId = this.lastSeenWithdrawRequestId + 1; requestId <= total; requestId++) {
+                if (this.isShuttingDown) break;
+
+                const gate = await this.db.getSethWithdrawByRequestId(CONFIG.seth.bridgeAddress, requestId);
+                if (
+                    gate &&
+                    gate.status === 'pending' &&
+                    gate.retry_count > 0 &&
+                    gate.next_retry_at &&
+                    new Date(gate.next_retry_at) > new Date()
+                ) {
+                    console.log(
+                        `[Relayer] Withdraw request #${requestId} in retry backoff until ${gate.next_retry_at}`
+                    );
+                    continue;
+                }
+
+                const req = await this.sethClient.getWithdrawRequest(
+                    this.relayerAddress,
+                    CONFIG.seth.bridgeAddress,
+                    requestId
+                );
+                if (!req) {
+                    console.warn(
+                        `[Relayer] getWithdrawRequest returned null for id=${requestId} (Seth query may have failed); will retry`
+                    );
+                    const failedRow = await this.db.markSethWithdrawFailed(
+                        CONFIG.seth.bridgeAddress,
+                        requestId,
+                        'getWithdrawRequest returned null (query failed or HTTP 500)',
+                        CONFIG.relayer.maxRetries
+                    );
+                    // Skip permanently bad historical ids so newer requests can still flow.
+                    if (
+                        failedRow &&
+                        Number(failedRow.retry_count) >= Number(failedRow.max_retries || CONFIG.relayer.maxRetries)
+                    ) {
+                        console.warn(
+                            `[Relayer] Skip stuck withdraw request #${requestId} after max retries, continue with newer ids`
+                        );
+                        this.lastSeenWithdrawRequestId = requestId;
+                        continue;
+                    }
+                    // For transient errors, keep cursor in place and retry later.
+                    break;
+                }
+                if (req.user === '0x0000000000000000000000000000000000000000') continue;
+                if (req.processed) {
+                    await this.db.upsertSethWithdrawRequest(CONFIG.seth.bridgeAddress, requestId, req, 'completed');
+                    await this.db.markSethWithdrawCompleted(CONFIG.seth.bridgeAddress, requestId, null, null);
+                    this.lastSeenWithdrawRequestId = requestId;
+                    continue;
+                }
+                
+                await this.handleSethWithdrawRequest(requestId, req);
+                this.lastSeenWithdrawRequestId = requestId;
+            }
+        } catch (error) {
+            console.error('[Relayer] Error polling Seth withdraw requests:', error.message);
+        }
+    }
+
+    async handleSethWithdrawRequest(requestId, req) {
+        const solanaRecipientHex = (req.solanaRecipient || '').replace(/^0x/, '');
+        console.log(`[Relayer] Detected reverse withdraw request #${requestId}`);
+        console.log(`[Relayer]   user=${req.user} susdcAmount=${req.susdcAmount}`);
+        console.log(`[Relayer]   solanaRecipient(bytes32)=0x${solanaRecipientHex}`);
+
+        const existingRow = await this.db.getSethWithdrawByRequestId(CONFIG.seth.bridgeAddress, requestId);
+        const upserted = await this.db.upsertSethWithdrawRequest(CONFIG.seth.bridgeAddress, requestId, req, 'pending');
+        if (!existingRow && upserted) {
+            await this.db.logWithdrawOperation(upserted.id, 'detect', { requestId });
+        }
+
+        if (!CONFIG.seth.enableReverseRelay) {
+            console.warn('[Relayer] Reverse relay disabled (ENABLE_SETH_TO_SOLANA=false), request kept pending');
+            return;
+        }
+
+        const procRow = await this.db.markSethWithdrawProcessing(CONFIG.seth.bridgeAddress, requestId, req);
+        await this.db.logWithdrawOperation(procRow.id, 'process', {
+            attempt: (procRow.retry_count || 0) + 1,
+        });
+
+        try {
+            const solanaUnlockSig = await this.processSethWithdrawToSolana(requestId, req);
+
+            const inputData = this.encodeMarkWithdrawToSolanaProcessed(requestId);
+            const result = await this.sethClient.sendContractCall(
+                CONFIG.seth.privateKey,
+                CONFIG.seth.bridgeAddress.replace('0x', ''),
+                inputData,
+                { gasLimit: 50000000, gasPrice: 1, amount: '0' }
+            );
+            if (!result.success) {
+                throw new Error(result.error || `Failed to mark withdraw request #${requestId} processed`);
+            }
+
+            await this.db.markSethWithdrawCompleted(
+                CONFIG.seth.bridgeAddress,
+                requestId,
+                solanaUnlockSig,
+                result.txHash || null
+            );
+            console.log(`[Relayer] Marked withdraw request #${requestId} as processed on Seth`);
+        } catch (error) {
+            await this.db.markSethWithdrawFailed(CONFIG.seth.bridgeAddress, requestId, error.message, CONFIG.relayer.maxRetries);
+            throw error;
+        }
+    }
+
+    async processSethWithdrawToSolana(requestId, req) {
+        if (!this.solanaRelayer) {
+            throw new Error('SOLANA_RELAYER_KEYPAIR is required for reverse bridge unlock');
+        }
+        
+        const amountBig = BigInt(req.susdcAmount || '0');
+        if (amountBig <= 0n || amountBig > 0xffffffffffffffffn) {
+            throw new Error(`Invalid reverse amount for request #${requestId}: ${req.susdcAmount}`);
+        }
+        
+        const recipient = this.decodeSolanaRecipientPubkey(req.solanaRecipient);
+        const programId = new PublicKey(CONFIG.solana.programId);
+        const usdcMint = new PublicKey(CONFIG.solana.usdcMint);
+        
+        const [configPda] = PublicKey.findProgramAddressSync([Buffer.from('config')], programId);
+        const [vaultAuthorityPda] = PublicKey.findProgramAddressSync([Buffer.from('vault_authority')], programId);
+        const [vaultTokenPda] = PublicKey.findProgramAddressSync([Buffer.from('vault_token_account')], programId);
+        const recipientTokenAccount = this.findAssociatedTokenAddress(recipient, usdcMint);
+        const requestIdLe = Buffer.alloc(8);
+        requestIdLe.writeBigUInt64LE(BigInt(requestId), 0);
+        const bridgeAddressBytes = Buffer.from(
+            CONFIG.seth.bridgeAddress.replace(/^0x/, '').padStart(40, '0'),
+            'hex'
+        );
+        const [unlockReceiptPda] = PublicKey.findProgramAddressSync(
+            [Buffer.from('seth_unlock'), bridgeAddressBytes, requestIdLe],
+            programId
+        );
+        
+        // Ensure recipient ATA exists before unlock; otherwise anchor rejects with AccountNotInitialized.
+        const ataInfo = await this.solanaConn.getAccountInfo(recipientTokenAccount, CONFIG.solana.commitment);
+        if (!ataInfo) {
+            const createAtaIx = createAssociatedTokenAccountInstruction(
+                this.solanaRelayer.publicKey,
+                recipientTokenAccount,
+                recipient,
+                usdcMint
+            );
+            const ataTx = new Transaction().add(createAtaIx);
+            const ataSig = await this.solanaConn.sendTransaction(ataTx, [this.solanaRelayer], { skipPreflight: false });
+            const ataConf = await this.solanaConn.confirmTransaction(ataSig, CONFIG.solana.commitment);
+            if (ataConf?.value?.err) {
+                throw new Error(`Create recipient ATA failed for request #${requestId}: ${JSON.stringify(ataConf.value.err)}`);
+            }
+            console.log(`[Relayer] Created recipient ATA for request #${requestId}: ${ataSig}`);
+        }
+
+        const requestKey =
+            (await this.sethClient.getWithdrawRequestKey(this.relayerAddress, CONFIG.seth.bridgeAddress, requestId)) ||
+            this.makeSethRequestHash(requestId);
+        const ixData = this.encodeUnlockFromSeth(
+            CONFIG.seth.bridgeAddress,
+            requestId,
+            amountBig,
+            requestKey
+        );
+        
+        const ix = new TransactionInstruction({
+            programId,
+            keys: [
+                { pubkey: this.solanaRelayer.publicKey, isSigner: true, isWritable: true },
+                { pubkey: configPda, isSigner: false, isWritable: false },
+                { pubkey: vaultTokenPda, isSigner: false, isWritable: true },
+                { pubkey: vaultAuthorityPda, isSigner: false, isWritable: false },
+                { pubkey: recipientTokenAccount, isSigner: false, isWritable: true },
+                { pubkey: unlockReceiptPda, isSigner: false, isWritable: true },
+                { pubkey: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'), isSigner: false, isWritable: false },
+                { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+            ],
+            data: ixData,
+        });
+        
+        const tx = new Transaction().add(ix);
+        const sig = await this.solanaConn.sendTransaction(tx, [this.solanaRelayer], { skipPreflight: false });
+        const conf = await this.solanaConn.confirmTransaction(sig, CONFIG.solana.commitment);
+        if (conf?.value?.err) {
+            throw new Error(`Solana unlock tx failed for request #${requestId}: ${JSON.stringify(conf.value.err)}`);
+        }
+        
+        console.log(`[Relayer] Solana unlock confirmed for request #${requestId}: ${sig}`);
+        return sig;
+    }
+
+    decodeSolanaRecipientPubkey(bytes32Hex) {
+        const raw = (bytes32Hex || '').replace(/^0x/, '');
+        if (raw.length !== 64) {
+            throw new Error(`Invalid solanaRecipient bytes32: ${bytes32Hex}`);
+        }
+        return new PublicKey(Buffer.from(raw, 'hex'));
+    }
+
+    findAssociatedTokenAddress(walletAddress, tokenMintAddress) {
+        const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+        const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+        const [ata] = PublicKey.findProgramAddressSync(
+            [walletAddress.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), tokenMintAddress.toBuffer()],
+            ASSOCIATED_TOKEN_PROGRAM_ID
+        );
+        return ata;
+    }
+
+    encodeUnlockFromSeth(bridgeAddress, requestId, amount, sethTxHashBytes32) {
+        // Anchor instruction discriminator: sha256("global:unlock_from_seth")[0..8] (not keccak)
+        const discriminator = crypto.createHash('sha256').update('global:unlock_from_seth').digest().subarray(0, 8);
+        const bridgeAddressWord = Buffer.alloc(20, 0);
+        const bridgeAddressRaw = (bridgeAddress || '').replace(/^0x/, '').toLowerCase();
+        if (!/^[0-9a-f]{40}$/.test(bridgeAddressRaw)) {
+            throw new Error(`Invalid SETH_BRIDGE_ADDRESS for unlock_from_seth: ${bridgeAddress}`);
+        }
+        Buffer.from(bridgeAddressRaw, 'hex').copy(bridgeAddressWord);
+        const requestIdLe = Buffer.alloc(8);
+        requestIdLe.writeBigUInt64LE(BigInt(requestId), 0);
+        const amountLe = Buffer.alloc(8);
+        amountLe.writeBigUInt64LE(BigInt(amount), 0);
+        const hash = Buffer.from((sethTxHashBytes32 || '').replace(/^0x/, '').padStart(64, '0'), 'hex');
+        return Buffer.concat([discriminator, bridgeAddressWord, requestIdLe, amountLe, hash]);
+    }
+
+    makeSethRequestHash(requestId) {
+        const bridge = (CONFIG.seth.bridgeAddress || '').replace(/^0x/, '').toLowerCase();
+        if (!/^[0-9a-f]{40}$/.test(bridge)) {
+            throw new Error(`Invalid SETH_BRIDGE_ADDRESS for request hash: ${CONFIG.seth.bridgeAddress}`);
+        }
+        const reqWord = BigInt(requestId).toString(16).padStart(64, '0');
+        const payloadHex = bridge + reqWord;
+        return '0x' + createKeccakHash('keccak256').update(Buffer.from(payloadHex, 'hex')).digest('hex');
+    }
 
     /**
      * Start Solana event listener
@@ -309,22 +606,27 @@ class BridgeRelayer {
             );
 
             if (!txDetails || !txDetails.meta) return null;
+            if (!this.isWhitelistedLockTransaction(txDetails)) {
+                return null;
+            }
 
             let amount = null;
-            let teamFunds = null;
             let recipientEth = null;
             let senderSolana = null;
 
             const logMessages = txDetails.meta.logMessages || [];
             for (const log of logMessages) {
-                if (log.includes('Program log:')) {
-                    const base64Data = log.split('Program log:')[1]?.trim();
+                // Anchor emits #[event] as `Program data: <base64>` (sol_log_data), not `Program log:`.
+                // Parsing arbitrary `Program log:` base64 misaligns offsets and yields garbage u64s.
+                if (log.includes('Program data:')) {
+                    const rest = log.split('Program data:')[1]?.trim();
+                    const base64Data = rest ? rest.split(/\s+/)[0] : '';
                     if (base64Data) {
                         try {
-                            const eventData = this.parseAnchorEvent(base64Data);
+                            const buf = Buffer.from(base64Data, 'base64');
+                            const eventData = this.parseRevenueProcessedEventBuffer(buf);
                             if (eventData) {
                                 amount = eventData.amount || amount;
-                                teamFunds = eventData.teamFunds || teamFunds;
                                 recipientEth = eventData.recipientEth || recipientEth;
                                 senderSolana = eventData.sender || senderSolana;
                             }
@@ -356,15 +658,12 @@ class BridgeRelayer {
             }
 
             if (!amount || !recipientEth) {
-                console.warn(`[Relayer] Could not parse amount/recipient from ${txSignature}`);
+                // console.warn(`[Relayer] Could not parse amount/recipient from ${txSignature}`);
                 return null;
             }
 
             const normalizedAmount = this.normalizeDbBigInt(amount, 'amount', txSignature);
             if (normalizedAmount === null) return null;
-            const normalizedTeamFunds = this.normalizeDbBigInt(teamFunds || 0n, 'team_funds', txSignature);
-            if (normalizedTeamFunds === null) return null;
-
             // Convert Solana signature to bytes32
             const sigBytes = bs58.decode(txSignature);
             const solanaTxSigBytes32 = '0x' + createKeccakHash('keccak256')
@@ -375,7 +674,6 @@ class BridgeRelayer {
                 solanaTxSig: txSignature,
                 solanaTxSigBytes32,
                 amount: normalizedAmount.toString(),
-                teamFunds: normalizedTeamFunds.toString(),
                 recipientEth,
                 senderSolana: senderSolana || 'unknown',
                 solanaBlockTime: txDetails.blockTime
@@ -388,100 +686,54 @@ class BridgeRelayer {
     }
 
     /**
-     * Parse Anchor event data (RevenueProcessed event)
-     * 
-     * RevenueProcessed event structure:
-     * - 8 bytes: event discriminator
-     * - 32 bytes: user (Pubkey)
-     * - 8 bytes: amount (u64) - original amount
-     * - 8 bytes: commission_l1 (u64)
-     * - 8 bytes: commission_l2 (u64)
-     * - 8 bytes: team_funds (u64) - 5% team funds
-     * - 8 bytes: project_funds (u64)
-     * - 8 bytes: ecosystem_funds (u64) - 30% ecosystem funds
-     * - 1 byte: has_l1_referrer (bool)
-     * - 32 bytes: l1_referrer (Option<Pubkey>)
-     * - 1 byte: has_l2_referrer (bool)
-     * - 32 bytes: l2_referrer (Option<Pubkey>)
-     * - 1 byte: product_type (u8)
-     * - 8 bytes: timestamp (i64)
+     * Parse RevenueProcessed from raw Anchor event bytes (Program data payload).
+     * Must match `contracts/solana/src/events.rs` (Borsh): no product_type field.
      */
-    parseAnchorEvent(base64Data) {
+    parseRevenueProcessedEventBuffer(buffer) {
         try {
-            const buffer = Buffer.from(base64Data, 'base64');
             if (buffer.length < 8) return null;
+            if (!buffer.slice(0, 8).equals(REVENUE_PROCESSED_EVENT_DISCRIMINATOR)) return null;
 
-            let offset = 8; // Skip discriminator
-            
-            // Read user (32 bytes)
+            let offset = 8;
             if (buffer.length < offset + 32) return null;
+            const sender = new PublicKey(buffer.slice(offset, offset + 32)).toString();
             offset += 32;
-            
-            // Read amount (8 bytes)
-            if (buffer.length < offset + 8) return null;
-            const amount = buffer.readBigUInt64LE(offset);
+
+            if (buffer.length < offset + 8 * 5) return null;
+            const originalAmount = buffer.readBigUInt64LE(offset);
             offset += 8;
-            
-            // Read commission_l1 (8 bytes)
-            if (buffer.length < offset + 8) return null;
+            offset += 8; // commission_l1
+            offset += 8; // commission_l2
+            offset += 8; // project_funds
+            const ecosystemFunds = buffer.readBigUInt64LE(offset);
             offset += 8;
-            
-            // Read commission_l2 (8 bytes)
-            if (buffer.length < offset + 8) return null;
-            offset += 8;
-            
-            // Read team_funds (8 bytes) - 5% team funds
-            let teamFunds = BigInt(0);
-            if (buffer.length >= offset + 8) {
-                teamFunds = buffer.readBigUInt64LE(offset);
-            }
-            offset += 8;
-            
-            // Read project_funds (8 bytes)
-            if (buffer.length < offset + 8) return null;
-            offset += 8;
-            
-            // Read ecosystem_funds (8 bytes) - 30% ecosystem funds
-            let ecosystemFunds = amount;
-            if (buffer.length >= offset + 8) {
-                ecosystemFunds = buffer.readBigUInt64LE(offset);
-            }
-            offset += 8;
-            
-            // Read l1_referrer (Option<Pubkey>)
+
             if (buffer.length < offset + 1) return null;
-            const hasL1Referrer = buffer.readUInt8(offset) === 1;
+            const l1Tag = buffer.readUInt8(offset);
             offset += 1;
-            if (hasL1Referrer && buffer.length >= offset + 32) {
+            if (l1Tag === 1) {
+                if (buffer.length < offset + 32) return null;
                 offset += 32;
-            }
-            
-            // Read l2_referrer (Option<Pubkey>)
+            } else if (l1Tag !== 0) return null;
+
             if (buffer.length < offset + 1) return null;
-            const hasL2Referrer = buffer.readUInt8(offset) === 1;
+            const l2Tag = buffer.readUInt8(offset);
             offset += 1;
-            if (hasL2Referrer && buffer.length >= offset + 32) {
+            if (l2Tag === 1) {
+                if (buffer.length < offset + 32) return null;
                 offset += 32;
-            }
-            
-            // Read product_type (1 byte)
-            if (buffer.length < offset + 1) return null;
-            const productType = buffer.readUInt8(offset);
-            offset += 1;
-            
-            // Read recipient (20 bytes) - if present
-            let recipientEth = null;
-            if (buffer.length >= offset + 20) {
-                const recipientEthBytes = buffer.slice(offset, offset + 20);
-                recipientEth = '0x' + recipientEthBytes.toString('hex');
-            }
-            
-            return { 
-                amount: ecosystemFunds.toString(), // 30% ecosystem funds
-                teamFunds: teamFunds.toString(),   // 5% team funds
-                originalAmount: amount.toString(),
+            } else if (l2Tag !== 0) return null;
+
+            if (buffer.length < offset + 20 + 8) return null;
+
+            const recipientEthBytes = buffer.slice(offset, offset + 20);
+            const recipientEth = '0x' + recipientEthBytes.toString('hex');
+
+            return {
+                amount: ecosystemFunds.toString(),
+                originalAmount: originalAmount.toString(),
                 recipientEth,
-                productType
+                sender,
             };
         } catch (error) {
             return null;
@@ -497,7 +749,9 @@ class BridgeRelayer {
             
             for (const ix of instructions) {
                 if (ix.programId?.toString() === CONFIG.solana.programId) {
-                    const data = Buffer.from(ix.data, 'base64');
+                    const data = this.decodeProgramInstructionData(ix.data);
+                    if (!data || data.length < 8) continue;
+                    if (!data.slice(0, 8).equals(PROCESS_REVENUE_INSTRUCTION_DISCRIMINATOR)) continue;
                     
                     if (data.length >= 8 + 8 + 20) {
                         let offset = 8;
@@ -515,6 +769,46 @@ class BridgeRelayer {
         } catch (error) {
             return null;
         }
+    }
+
+    decodeProgramInstructionData(dataStr) {
+        if (typeof dataStr !== 'string' || dataStr.length === 0) return null;
+        try {
+            return bs58.decode(dataStr);
+        } catch {}
+        try {
+            return Buffer.from(dataStr, 'base64');
+        } catch {}
+        return null;
+    }
+
+    isWhitelistedLockTransaction(txDetails) {
+        const logMessages = txDetails.meta?.logMessages || [];
+        const hasProcessRevenueLog = logMessages.some((log) => log.includes('Instruction: ProcessRevenue'));
+        if (!hasProcessRevenueLog) return false;
+
+        const hasRevenueEvent = logMessages.some((log) => {
+            if (!log.includes('Program data:')) return false;
+            const rest = log.split('Program data:')[1]?.trim();
+            const base64Data = rest ? rest.split(/\s+/)[0] : '';
+            if (!base64Data) return false;
+            try {
+                const buf = Buffer.from(base64Data, 'base64');
+                return !!this.parseRevenueProcessedEventBuffer(buf);
+            } catch {
+                return false;
+            }
+        });
+        if (!hasRevenueEvent) return false;
+
+        const instructions = txDetails.transaction?.message?.instructions || [];
+        const hasProcessRevenueIx = instructions.some((ix) => {
+            if (ix.programId?.toString() !== CONFIG.solana.programId) return false;
+            const data = this.decodeProgramInstructionData(ix.data);
+            return !!(data && data.length >= 8 && data.slice(0, 8).equals(PROCESS_REVENUE_INSTRUCTION_DISCRIMINATOR));
+        });
+
+        return hasProcessRevenueIx;
     }
 
     /**
@@ -557,50 +851,44 @@ class BridgeRelayer {
     /**
      * Process single message - call Seth bridge contract
      * 
-     * Distribution scheme (10-5-5-50-30):
+     * Distribution scheme (10-5-0-50-35):
      * - L1 Commission (10%) -> Solana real-time transfer to referrer
      * - L2 Commission (5%)  -> Solana real-time transfer to L2 referrer
      * - Project Reserve (50%) -> Solana real-time transfer to Gnosis Safe
-     * - Cross-chain Ecosystem (30%) -> Cross-chain to PoolB (amount field)
-     * - Team Incentive (5%)  -> Cross-chain to TeamPayroll (team_funds field)
+     * - Cross-chain Ecosystem (35%) -> Cross-chain to PoolB (amount field)
      */
     async processMessage(message) {
-        const { id, solana_tx_sig, solana_tx_sig_bytes32, amount, recipient_eth, team_funds } = message;
+        const { id, solana_tx_sig, solana_tx_sig_bytes32, amount, recipient_eth } = message;
 
         try {
             await this.db.markAsProcessing(id);
             await this.db.logOperation(id, 'process', { attempt: message.retry_count + 1 });
 
             console.log(`[Relayer] Processing message ${id}: ${solana_tx_sig}`);
-            console.log(`[Relayer]   Ecosystem Amount (30%): ${amount}`);
-            console.log(`[Relayer]   Team Funds (5%): ${team_funds || 0}`);
+            console.log(`[Relayer]   Ecosystem Amount (35%): ${amount}`);
             console.log(`[Relayer]   Recipient: ${recipient_eth}`);
 
             // Cross-chain fund processing:
-            // SethBridge.processCrossChainMessage(bytes32 solanaTxSig, uint256 ecosystemAmount, uint256 teamFundsAmount, uint256 amountSETH)
-            // - ecosystemAmount: 30% ecosystem funds -> inject to PoolB
-            // - teamFundsAmount: 5% team funds -> to TeamPayroll (auto-swap to SETH via PoolB)
-            // - amountSETH: native SETH (for PoolB liquidity pairing)
+            // SethBridge.processCrossChainMessageV2(bytes32,uint256,uint256,address)
             const ecosystemAmount = BigInt(amount || 0);
-            const teamFundsAmount = BigInt(team_funds || 0);
-            const amountSETH = BigInt(CONFIG.seth.injectNativeWei);
-            
-            const inputData = this.encodeProcessCrossChainMessage(
-                solana_tx_sig_bytes32, 
-                ecosystemAmount, 
-                teamFundsAmount, 
-                amountSETH
+            const amountSETH = BigInt(CONFIG.seth.injectSethAmount);
+
+            const inputData = this.encodeProcessCrossChainMessageV2(
+                solana_tx_sig_bytes32,
+                ecosystemAmount,
+                amountSETH,
+                recipient_eth
             );
             const selector = inputData.slice(0, 8);
-            console.log(`[Relayer] Seth call: processCrossChainMessage selector=0x${selector}`);
-            console.log(`[Relayer]   ecosystemAmount=${ecosystemAmount.toString()} teamFundsAmount=${teamFundsAmount.toString()} msg.value=${amountSETH.toString()}`);
+            console.log(`[Relayer] Seth call: processCrossChainMessageV2 selector=0x${selector}`);
+            console.log(`[Relayer]   ecosystemAmount=${ecosystemAmount.toString()} msg.value=${amountSETH.toString()}`);
 
             // Send transaction using SethClient
             const result = await this.sethClient.sendContractCall(
                 CONFIG.seth.privateKey,
                 CONFIG.seth.bridgeAddress.replace('0x', ''),
                 inputData,
-                { gasLimit: 200000, gasPrice: 1, amount: amountSETH.toString() }
+                { gasLimit: 50000000, gasPrice: 1, amount: amountSETH.toString() }
             );
 
             if (result.success) {
@@ -613,11 +901,19 @@ class BridgeRelayer {
                 // Success doesn't mean on-chain: poll transaction_receipt for confirmation
                 const receipt = await this.waitSethReceipt(result.txHash, 8, 1000);
                 console.log(`[Relayer] Seth receipt: ${receipt ? JSON.stringify(receipt) : '(null)'}`);
+                if (!receipt) {
+                    // No terminal receipt found in polling window, keep message retryable.
+                    throw new Error(`Seth tx receipt timeout: ${result.txHash}`);
+                }
                 if (receipt?.status === 10) {
                     // kNotExists: transaction not found on node, treat as dropped, retry
                     throw new Error(`Seth tx not exists (status=10): ${result.txHash}`);
                 }
-                
+                // Seth terminal failure (observed: status 5 + msg kTxInvalidAddress) — must not mark completed
+                if (receipt?.status === 5) {
+                    throw new Error(`Seth tx failed (status=5): ${JSON.stringify(receipt.raw)}`);
+                }
+
                 await this.db.markAsCompleted(id, {
                     txHash: result.txHash,
                     blockNumber: result.nonce
@@ -664,8 +960,8 @@ class BridgeRelayer {
         for (let i = 0; i < maxAttempts; i++) {
             const r = await this.sethClient.getTxReceipt(txHash);
             if (r) {
-                // done=true means terminal state; status=10 means not exists, return immediately for error handling
-                if (r.done || r.status === 10) return r;
+                // Terminal receipt only (status 10 = not indexed yet; SethClient marks done=false)
+                if (r.done) return r;
             }
             await this.sleep(intervalMs);
         }
@@ -673,26 +969,36 @@ class BridgeRelayer {
     }
 
     /**
-     * Encode processCrossChainMessage function call
-     * function processCrossChainMessage(bytes32 solanaTxSig, uint256 ecosystemAmount, uint256 teamFundsAmount, uint256 amountSETH)
+     * Encode processCrossChainMessageV2 function call
+     * function processCrossChainMessageV2(bytes32,uint256,uint256,address)
      * @param solanaTxSigBytes32 Solana transaction signature (bytes32)
-     * @param ecosystemAmount Ecosystem funds (30%) - inject to PoolB
-     * @param teamFundsAmount Team funds (5%) - to TeamPayroll
+     * @param ecosystemAmount Ecosystem funds (35%) - inject to PoolB
      * @param amountSETH Native SETH amount (for PoolB liquidity)
      */
-    encodeProcessCrossChainMessage(solanaTxSigBytes32, ecosystemAmount, teamFundsAmount, amountSETH) {
+    encodeProcessCrossChainMessageV2(solanaTxSigBytes32, ecosystemAmount, amountSETH, recipient) {
         const sig = solanaTxSigBytes32.replace(/^0x/, '').padStart(64, '0');
         const ecoAmt = BigInt(ecosystemAmount).toString(16).padStart(64, '0');
-        const teamAmt = BigInt(teamFundsAmount).toString(16).padStart(64, '0');
         const amtSETH = BigInt(amountSETH).toString(16).padStart(64, '0');
+        const recipientWord = (recipient || '0x0000000000000000000000000000000000000000')
+            .replace(/^0x/, '')
+            .toLowerCase()
+            .padStart(64, '0');
 
-        // selector = keccak256("processCrossChainMessage(bytes32,uint256,uint256,uint256)")[:4]
         const selector = createKeccakHash('keccak256')
-            .update('processCrossChainMessage(bytes32,uint256,uint256,uint256)')
+            .update('processCrossChainMessageV2(bytes32,uint256,uint256,address)')
             .digest('hex')
             .slice(0, 8);
 
-        return selector + sig + ecoAmt + teamAmt + amtSETH;
+        return selector + sig + ecoAmt + amtSETH + recipientWord;
+    }
+    
+    encodeMarkWithdrawToSolanaProcessed(requestId) {
+        const requestIdWord = BigInt(requestId).toString(16).padStart(64, '0');
+        const selector = createKeccakHash('keccak256')
+            .update('markWithdrawToSolanaProcessed(uint256)')
+            .digest('hex')
+            .slice(0, 8);
+        return selector + requestIdWord;
     }
 
     /**
@@ -746,17 +1052,57 @@ class BridgeRelayer {
     async processRetries() {
         try {
             const messages = await this.db.getPendingRetries(CONFIG.relayer.batchSize);
-            
-            if (messages.length === 0) return;
 
-            console.log(`[Relayer] Processing ${messages.length} retry messages`);
+            if (messages.length > 0) {
+                console.log(`[Relayer] Processing ${messages.length} retry messages`);
 
-            for (const message of messages) {
+                for (const message of messages) {
+                    if (this.isShuttingDown) break;
+
+                    console.log(`[Relayer] Retrying message ${message.id} (attempt ${message.retry_count + 1})`);
+                    await this.db.logOperation(message.id, 'retry', { attempt: message.retry_count + 1 });
+                    await this.processMessage(message);
+                }
+            }
+
+            const withdrawRetries = await this.db.getPendingWithdrawRetries(
+                CONFIG.seth.bridgeAddress,
+                CONFIG.relayer.batchSize
+            );
+            if (withdrawRetries.length === 0) return;
+
+            console.log(`[Relayer] Processing ${withdrawRetries.length} Seth→Solana withdraw retries`);
+
+            for (const w of withdrawRetries) {
                 if (this.isShuttingDown) break;
-                
-                console.log(`[Relayer] Retrying message ${message.id} (attempt ${message.retry_count + 1})`);
-                await this.db.logOperation(message.id, 'retry', { attempt: message.retry_count + 1 });
-                await this.processMessage(message);
+
+                const req = await this.sethClient.getWithdrawRequest(
+                    this.relayerAddress,
+                    CONFIG.seth.bridgeAddress,
+                    w.request_id
+                );
+                if (!req) {
+                    await this.db.markSethWithdrawFailed(
+                        CONFIG.seth.bridgeAddress,
+                        w.request_id,
+                        'getWithdrawRequest returned null on retry',
+                        CONFIG.relayer.maxRetries
+                    );
+                    continue;
+                }
+                if (req.user === '0x0000000000000000000000000000000000000000') continue;
+                if (req.processed) {
+                    await this.db.upsertSethWithdrawRequest(CONFIG.seth.bridgeAddress, w.request_id, req, 'completed');
+                    await this.db.markSethWithdrawCompleted(CONFIG.seth.bridgeAddress, w.request_id, null, null);
+                    continue;
+                }
+
+                await this.db.logWithdrawOperation(w.id, 'retry', { attempt: w.retry_count + 1 });
+                try {
+                    await this.handleSethWithdrawRequest(w.request_id, req);
+                } catch (e) {
+                    console.error(`[Relayer] Withdraw retry failed for request #${w.request_id}:`, e.message);
+                }
             }
         } catch (error) {
             console.error('[Relayer] Error processing retries:', error.message);
@@ -775,7 +1121,14 @@ class BridgeRelayer {
             try {
                 const dbStats = await this.db.getStats();
                 console.log('[Relayer] Stats:', {
-                    ...dbStats,
+                    inbound: {
+                        pending: dbStats.pending,
+                        processing: dbStats.processing,
+                        completed: dbStats.completed,
+                        failed: dbStats.failed,
+                        total: dbStats.total,
+                    },
+                    withdraw: dbStats.withdraw,
                     sessionProcessed: this.stats.totalProcessed,
                     sessionFailed: this.stats.totalFailed,
                     lastProcessed: this.stats.lastProcessedAt

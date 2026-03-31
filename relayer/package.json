@@ -10,11 +10,12 @@
     "dev": "nodemon relayer.js",
     "dev:bsc": "nodemon bsc-relayer.js",
     "dev:bsc:v2": "nodemon bsc-relayer-v2.js",
-    "db:init": "psql -U postgres -d bridge_relayer -f db/init.sql",
-    "db:init:bsc": "psql -U postgres -d bridge_relayer_bsc -f db/init.sql",
+    "db:init": "mysql -u root bridge_relayer < db/init.sql",
+    "db:init:bsc": "mysql -u root bridge_relayer_bsc < db/init.sql",
     "test": "echo \"No tests yet\" && exit 0",
     "test:bsc": "node testBscClient.js",
-    "test:bsc:load": "node -e \"const BscClient = require('./bscClient'); console.log('BscClient loaded successfully');\""
+    "test:bsc:load": "node -e \"const BscClient = require('./bscClient'); console.log('BscClient loaded successfully');\"",
+    "verify:seth": "node verify-seth-bridge.js"
   },
   "keywords": [
     "blockchain",
@@ -27,6 +28,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.87.0",
     "axios": "^1.6.0",
     "bs58": "^5.0.0",
@@ -35,7 +37,7 @@
     "ethers": "^6.16.0",
     "https-proxy-agent": "^7.0.6",
     "keccak": "^3.0.4",
-    "pg": "^8.11.3",
+    "mysql2": "^3.14.5",
     "secp256k1": "^5.0.0"
   },
   "devDependencies": {

@@ -21,6 +21,11 @@ const { Buffer } = require('buffer');
 const createKeccakHash = require('keccak');
 const EventEmitter = require('events');
 
+/** Anchor `emit!(RevenueProcessed { ... })` — sha256("event:RevenueProcessed")[0..8] */
+const REVENUE_PROCESSED_EVENT_DISCRIMINATOR = Buffer.from([
+    181, 26, 199, 237, 159, 186, 73, 241,
+]);
+
 // ==================== Configuration ====================
 const CONFIG = {
     solana: {
@@ -550,11 +555,13 @@ class HighConcurrencyBscRelayer {
 
             const logMessages = txDetails.meta.logMessages || [];
             for (const log of logMessages) {
-                if (log.includes('Program log:')) {
-                    const base64Data = log.split('Program log:')[1]?.trim();
+                if (log.includes('Program data:')) {
+                    const rest = log.split('Program data:')[1]?.trim();
+                    const base64Data = rest ? rest.split(/\s+/)[0] : '';
                     if (base64Data) {
                         try {
-                            const eventData = this.parseAnchorEvent(base64Data);
+                            const buf = Buffer.from(base64Data, 'base64');
+                            const eventData = this.parseRevenueProcessedEventBuffer(buf);
                             if (eventData) {
                                 amount = eventData.amount || amount;
                                 recipientEth = eventData.recipientEth || recipientEth;
@@ -608,20 +615,53 @@ class HighConcurrencyBscRelayer {
         }
     }
 
-    parseAnchorEvent(base64Data) {
+    /**
+     * Parse RevenueProcessed from `Program data` payload.
+     * Matches `contracts/solana/src/events.rs` (Borsh): no team_funds field.
+     */
+    parseRevenueProcessedEventBuffer(buffer) {
         try {
-            const buffer = Buffer.from(base64Data, 'base64');
             if (buffer.length < 8) return null;
+            if (!buffer.slice(0, 8).equals(REVENUE_PROCESSED_EVENT_DISCRIMINATOR)) return null;
 
             let offset = 8;
-            if (buffer.length >= offset + 8 + 20) {
-                const amount = buffer.readBigUInt64LE(offset);
-                offset += 8;
-                const recipientEthBytes = buffer.slice(offset, offset + 20);
-                const recipientEth = '0x' + recipientEthBytes.toString('hex');
-                return { amount: amount.toString(), recipientEth };
-            }
-            return null;
+            if (buffer.length < offset + 32) return null;
+            const sender = new PublicKey(buffer.slice(offset, offset + 32)).toString();
+            offset += 32;
+
+            if (buffer.length < offset + 8 * 5) return null;
+            offset += 8; // amount
+            offset += 8; // commission_l1
+            offset += 8; // commission_l2
+            offset += 8; // project_funds
+            const ecosystemFunds = buffer.readBigUInt64LE(offset);
+            offset += 8;
+
+            if (buffer.length < offset + 1) return null;
+            const l1Tag = buffer.readUInt8(offset);
+            offset += 1;
+            if (l1Tag === 1) {
+                if (buffer.length < offset + 32) return null;
+                offset += 32;
+            } else if (l1Tag !== 0) return null;
+
+            if (buffer.length < offset + 1) return null;
+            const l2Tag = buffer.readUInt8(offset);
+            offset += 1;
+            if (l2Tag === 1) {
+                if (buffer.length < offset + 32) return null;
+                offset += 32;
+            } else if (l2Tag !== 0) return null;
+
+            if (buffer.length < offset + 20 + 8) return null;
+            const recipientEthBytes = buffer.slice(offset, offset + 20);
+            const recipientEth = '0x' + recipientEthBytes.toString('hex');
+
+            return {
+                amount: ecosystemFunds.toString(),
+                recipientEth,
+                sender,
+            };
         } catch (error) {
             return null;
         }

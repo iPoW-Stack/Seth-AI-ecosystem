@@ -6,8 +6,15 @@ pragma solidity ^0.8.20;
  * @notice Cross-chain mapped USDC token with mint/burn support
  * @dev Ownable functionality inlined, no external dependencies
  *      Includes DIRM curve trading functionality
+ *
+ *      All ERC20 `amount` values use **6 decimals** (USDC-like). Internal DIRM `SCALE_*` is 1e6 so
+ *      fixed-point math matches token decimals. Virtual pool legs (reserveX / reserveY) use the same raw scale.
  */
 contract sUSDC {
+    /// @dev DIRM fixed-point uses sUSDC decimal scale (1e6).
+    uint256 private constant SCALE_U = 1_000_000;
+    int256 private constant SCALE_S = int256(uint256(1_000_000));
+
     // ==================== Ownable Functionality (Inlined) ====================
     
     address private _owner;
@@ -138,15 +145,15 @@ contract sUSDC {
     // Curve Parameters
     uint256 public constant A = 100;
     
-    // DIRM Parameters (1e18 precision)
-    int256 public constant TAU = 2e16;       // 0.02
-    int256 public constant K = 30e18;        // 30.0
-    int256 public constant R_MAX = 5e16;     // 0.05
-    int256 public constant TARGET_P = 1e18;  // 1.00
+    // DIRM Parameters (SCALE = 1e6 fixed-point)
+    int256 public constant TAU = 20_000; // 0.02 * SCALE
+    int256 public constant K = 30 * SCALE_S; // 30.0 * SCALE
+    int256 public constant R_MAX = 50_000; // 0.05 * SCALE
+    int256 public constant TARGET_P = SCALE_S; // 1.00 * SCALE
 
-    // State Variables (internal ledger)
-    uint256 public reserveX;  // USDC reserve
-    uint256 public reserveY;  // sUSDC reserve
+    // State Variables (internal ledger; amounts in 6-decimal raw, same as ERC20)
+    uint256 public reserveX;  // virtual "X" leg (same decimal scale as sUSDC)
+    uint256 public reserveY;  // virtual sUSDC reserve
     uint256 public treasuryX; // Treasury X
     uint256 public treasuryY; // Treasury Y
     
@@ -177,11 +184,11 @@ contract sUSDC {
     // ==================== Fixed-Point Math Helper Functions ====================
 
     function mulWad(int256 a, int256 b) internal pure returns (int256) {
-        return (a * b) / 1e18;
+        return (a * b) / SCALE_S;
     }
 
     function divWad(int256 a, int256 b) internal pure returns (int256) {
-        return (a * 1e18) / b;
+        return (a * SCALE_S) / b;
     }
 
     // Padé approximation tanh(x)
@@ -190,18 +197,18 @@ contract sUSDC {
         bool isNegative = x < 0;
         int256 absX = isNegative ? -x : x;
         
-        if (absX >= 3e18) {
-            return isNegative ? -int256(1e18) : int256(1e18);
+        if (absX >= 3 * SCALE_S) {
+            return isNegative ? -SCALE_S : SCALE_S;
         }
 
         int256 x2 = mulWad(absX, absX);
         int256 x3 = mulWad(x2, absX);
         
         int256 num = x3 + (15 * absX);
-        int256 den = (6 * x2) + 15e18;
+        int256 den = (6 * x2) + (15 * SCALE_S);
         
         int256 result = divWad(num, den);
-        if (result > 1e18) result = 1e18;
+        if (result > SCALE_S) result = SCALE_S;
         
         return isNegative ? -result : result;
     }
@@ -257,7 +264,7 @@ contract sUSDC {
         uint256 num = term1 + term2_num;
         uint256 den = term1 + term2_den;
         
-        return (num * 1e18) / den;
+        return (num * SCALE_U) / den;
     }
 
     function getR(uint256 currentP) public pure returns (int256) {
@@ -286,14 +293,14 @@ contract sUSDC {
         uint256 y_new = getY(reserveX + dx, D);
         uint256 dy_curve = reserveY - y_new;
 
-        uint256 P_curve = (dx * 1e18) / dy_curve;
+        uint256 P_curve = (dx * SCALE_U) / dy_curve;
         uint256 P_marginal = getP(reserveX, reserveY, D);
         int256 R = getR(P_marginal);
 
         int256 P_eff = int256(P_curve) + R;
         require(P_eff > 0, "Invalid effective price");
         
-        dy_actual = (dx * 1e18) / uint256(P_eff);
+        dy_actual = (dx * SCALE_U) / uint256(P_eff);
 
         if (dy_actual < dy_curve) {
             treasuryY += (dy_curve - dy_actual);

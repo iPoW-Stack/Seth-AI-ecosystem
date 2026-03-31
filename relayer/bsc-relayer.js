@@ -18,6 +18,11 @@ const BscClient = require('./bscClient');
 const { Buffer } = require('buffer');
 const createKeccakHash = require('keccak');
 
+/** Anchor `emit!(RevenueProcessed { ... })` — sha256("event:RevenueProcessed")[0..8] */
+const REVENUE_PROCESSED_EVENT_DISCRIMINATOR = Buffer.from([
+    181, 26, 199, 237, 159, 186, 73, 241,
+]);
+
 // ==================== Configuration ====================
 const CONFIG = {
     // Solana Configuration
@@ -369,29 +374,21 @@ class BscBridgeRelayer {
             let senderSolana = null;
 
             const logMessages = txDetails.meta.logMessages || [];
-            
-            // Get all known discriminators (no logging for performance)
-            const allDiscriminators = this.getAllEventDiscriminators();
-            
+
             for (const log of logMessages) {
-                if (log.includes('Program log:')) {
-                    const base64Data = log.split('Program log:')[1]?.trim();
+                // Anchor emits #[event] as `Program data: <base64>` (sol_log_data), not `Program log:`.
+                if (log.includes('Program data:')) {
+                    const rest = log.split('Program data:')[1]?.trim();
+                    const base64Data = rest ? rest.split(/\s+/)[0] : '';
                     if (base64Data) {
                         try {
-                            const debugBuffer = Buffer.from(base64Data, 'base64');
-                            const discHex = debugBuffer.slice(0, 8).toString('hex');
-                            const eventName = allDiscriminators[discHex];
-                            
-                            // Only process RevenueProcessed events
-                            if (eventName === 'RevenueProcessed') {
-                                const eventData = this.parseAnchorEvent(base64Data);
-                                if (eventData) {
-                                    console.log(`[BscRelayer] Found RevenueProcessed: amount=${eventData.amount}, recipient=${eventData.recipientEth}`);
-                                    amount = eventData.amount || amount;
-                                    teamFunds = eventData.teamFunds || teamFunds;
-                                    recipientEth = eventData.recipientEth || recipientEth;
-                                    senderSolana = eventData.sender || senderSolana;
-                                }
+                            const buf = Buffer.from(base64Data, 'base64');
+                            const eventData = this.parseRevenueProcessedEventBuffer(buf);
+                            if (eventData) {
+                                console.log(`[BscRelayer] Found RevenueProcessed: amount=${eventData.amount}, recipient=${eventData.recipientEth}`);
+                                amount = eventData.amount || amount;
+                                recipientEth = eventData.recipientEth || recipientEth;
+                                senderSolana = eventData.sender || senderSolana;
                             }
                         } catch (e) {
                             // Silent fail for event parsing
@@ -463,153 +460,54 @@ class BscBridgeRelayer {
     }
 
     /**
-     * Get all known event discriminators from IDL
-     * Note: Anchor event discriminators are computed as sha256("event:event_name")[0:8]
-     * But we use the values from the IDL to ensure accuracy
+     * Parse RevenueProcessed from raw Anchor event bytes (`Program data` payload).
+     * Matches `contracts/solana/src/events.rs` (Borsh): no team_funds field.
      */
-    getAllEventDiscriminators() {
-        // Discriminator values from seth_bridge.json IDL events section
-        const idlEvents = {
-            'CommissionWithdrawn': [254, 232, 110, 152, 180, 119, 151, 159],  // feee6e98b477979f
-            'CrossChainCompleted': [31, 133, 249, 252, 26, 228, 226, 174],   // 1f85f9fc1ae4e2ae
-            'MonthlySettlement': [96, 181, 30, 121, 119, 67, 84, 36],        // 60b51e7977c35424
-            'ReferrerSet': [65, 187, 29, 205, 116, 229, 69, 154],            // 41bb1bcd74e5459a
-            'RelayerUpdated': [166, 12, 250, 34, 211, 198, 204, 222],        // a60cfa22d3c6ccde
-            'RevenueProcessed': [181, 26, 199, 237, 159, 186, 73, 241],      // b51ac7ed9fba49f1
-        };
-        
-        const discriminators = {};
-        for (const [name, bytes] of Object.entries(idlEvents)) {
-            const hex = Buffer.from(bytes).toString('hex');
-            discriminators[hex] = name;
-        }
-        return discriminators;
-    }
-
-    /**
-     * Get RevenueProcessed event discriminator from IDL
-     */
-    getRevenueProcessedDiscriminator() {
-        // From IDL: [181, 26, 199, 237, 159, 186, 73, 241] = b51ac7ed9fba49f1
-        return Buffer.from([181, 26, 199, 237, 159, 186, 73, 241]);
-    }
-
-    /**
-     * Parse Anchor event data (RevenueProcessed event)
-     * 
-     * RevenueProcessed event structure (updated with seth_recipient):
-     * - 8 bytes: event discriminator
-     * - 32 bytes: user (Pubkey)
-     * - 8 bytes: amount (u64) - original amount
-     * - 8 bytes: commission_l1 (u64)
-     * - 8 bytes: commission_l2 (u64)
-     * - 8 bytes: team_funds (u64) - 5% team funds
-     * - 8 bytes: project_funds (u64)
-     * - 8 bytes: ecosystem_funds (u64) - 30% ecosystem funds
-     * - 1 byte: has_l1_referrer (bool)
-     * - 32 bytes: l1_referrer (Option<Pubkey>) - only if has_l1_referrer
-     * - 1 byte: has_l2_referrer (bool)
-     * - 32 bytes: l2_referrer (Option<Pubkey>) - only if has_l2_referrer
-     * - 1 byte: product_type (u8)
-     * - 20 bytes: seth_recipient (EVM address)
-     * - 8 bytes: timestamp (i64)
-     * 
-     * Minimum size with seth_recipient: 8 + 32 + 8*5 + 1 + 1 + 1 + 20 = 103 bytes (no referrers)
-     * Minimum size without seth_recipient (old format): 8 + 32 + 8*5 + 1 + 1 + 1 + 8 = 87 bytes
-     */
-    parseAnchorEvent(base64Data) {
+    parseRevenueProcessedEventBuffer(buffer) {
         try {
-            const buffer = Buffer.from(base64Data, 'base64');
-            
-            // Minimum size check: at least discriminator
             if (buffer.length < 8) return null;
+            if (!buffer.slice(0, 8).equals(REVENUE_PROCESSED_EVENT_DISCRIMINATOR)) return null;
 
-            // Check if this is a RevenueProcessed event by discriminator
-            const discriminator = buffer.slice(0, 8);
-            const expectedDiscriminator = this.getRevenueProcessedDiscriminator();
-            
-            if (!discriminator.equals(expectedDiscriminator)) {
-                // Not a RevenueProcessed event, skip silently
-                return null;
-            }
-
-            // Minimum size check: at least discriminator + user + amounts
-            if (buffer.length < 8 + 32 + 8*5) return null;
-
-            let offset = 8; // Skip discriminator
-            
-            // Read user (32 bytes)
+            let offset = 8;
+            if (buffer.length < offset + 32) return null;
+            const sender = new PublicKey(buffer.slice(offset, offset + 32)).toString();
             offset += 32;
-            
-            // Read amount (8 bytes)
-            const amount = buffer.readBigUInt64LE(offset);
+
+            if (buffer.length < offset + 8 * 5) return null;
+            const originalAmount = buffer.readBigUInt64LE(offset);
             offset += 8;
-            
-            // Read commission_l1 (8 bytes)
-            offset += 8;
-            
-            // Read commission_l2 (8 bytes)
-            offset += 8;
-            
-            // Read team_funds (8 bytes)
-            const teamFunds = buffer.readBigUInt64LE(offset);
-            offset += 8;
-            
-            // Read project_funds (8 bytes)
-            offset += 8;
-            
-            // Read ecosystem_funds (8 bytes)
+            offset += 8; // commission_l1
+            offset += 8; // commission_l2
+            offset += 8; // project_funds
             const ecosystemFunds = buffer.readBigUInt64LE(offset);
             offset += 8;
-            
-            // Read l1_referrer (Option<Pubkey>)
+
             if (buffer.length < offset + 1) return null;
-            const hasL1Referrer = buffer.readUInt8(offset) === 1;
+            const l1Tag = buffer.readUInt8(offset);
             offset += 1;
-            if (hasL1Referrer) {
+            if (l1Tag === 1) {
                 if (buffer.length < offset + 32) return null;
                 offset += 32;
-            }
-            
-            // Read l2_referrer (Option<Pubkey>)
+            } else if (l1Tag !== 0) return null;
+
             if (buffer.length < offset + 1) return null;
-            const hasL2Referrer = buffer.readUInt8(offset) === 1;
+            const l2Tag = buffer.readUInt8(offset);
             offset += 1;
-            if (hasL2Referrer) {
+            if (l2Tag === 1) {
                 if (buffer.length < offset + 32) return null;
                 offset += 32;
-            }
-            
-            // Read product_type (1 byte)
-            if (buffer.length < offset + 1) return null;
-            const productType = buffer.readUInt8(offset);
-            offset += 1;
-            
-            // Read seth_recipient (20 bytes EVM address)
-            // Only if buffer has enough space (new format with seth_recipient)
-            let recipientEth = null;
-            const remainingBytes = buffer.length - offset;
-            
-            if (remainingBytes >= 20) {
-                // New format: 20 bytes seth_recipient + 8 bytes timestamp
-                const recipientEthBytes = buffer.slice(offset, offset + 20);
-                recipientEth = '0x' + recipientEthBytes.toString('hex');
-                // Don't increment offset, we're done
-            } else if (remainingBytes >= 8) {
-                // Old format: only 8 bytes timestamp, no seth_recipient
-                // Skip this event as it doesn't have the recipient
-                return null;
-            } else {
-                // Not enough data
-                return null;
-            }
-            
-            return { 
+            } else if (l2Tag !== 0) return null;
+
+            if (buffer.length < offset + 20 + 8) return null;
+
+            const recipientEthBytes = buffer.slice(offset, offset + 20);
+            const recipientEth = '0x' + recipientEthBytes.toString('hex');
+
+            return {
                 amount: ecosystemFunds.toString(),
-                teamFunds: teamFunds.toString(),
-                originalAmount: amount.toString(),
+                originalAmount: originalAmount.toString(),
                 recipientEth,
-                productType
+                sender,
             };
         } catch (error) {
             return null;
@@ -696,15 +594,12 @@ class BscBridgeRelayer {
                 if (ix.programId?.toString() === CONFIG.solana.programId) {
                     const data = Buffer.from(ix.data, 'base64');
                     
-                    // process_revenue instruction: 8 bytes discriminator + 8 bytes amount + 1 byte product_type + 20 bytes recipient
-                    if (data.length >= 8 + 8 + 1 + 20) {
+                    // process_revenue: 8 byte discriminator + 8 byte amount + 20 byte seth_recipient
+                    if (data.length >= 8 + 8 + 20) {
                         let offset = 8;
                         const amount = data.readBigUInt64LE(offset);
                         offset += 8;
-                        
-                        // Skip product_type
-                        offset += 1;
-                        
+
                         const recipientEthBytes = data.slice(offset, offset + 20);
                         const recipientEth = '0x' + recipientEthBytes.toString('hex');
                         

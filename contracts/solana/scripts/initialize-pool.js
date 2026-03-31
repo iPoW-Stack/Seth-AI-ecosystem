@@ -1,9 +1,9 @@
 /**
- * DIRM 池初始化脚本（不依赖 Anchor Program）
- * 步骤: 1. initialize_pool  2. initialize_vaults
+ * DIRM pool initialization script (without Anchor Program client)
+ * Steps: 1. initialize_pool  2. initialize_vaults
  *
- * 用法: node scripts/initialize-pool.js
- * 环境变量: USDC_MINT, SUSDC_MINT, DIRM_PROGRAM_ID (可选)
+ * Usage: node scripts/initialize-pool.js
+ * Env vars: USDC_MINT, SUSDC_MINT, DIRM_PROGRAM_ID (optional)
  */
 
 const {
@@ -30,14 +30,13 @@ const CONFIG = {
         if (d.dirmProgramId) return d.dirmProgramId;
       } catch {}
     }
-    // 默认使用当前已部署的 dirm_program ID
-    return '125eQs1s3SNxd5KFRpAJ6JvtVpD4tRYw6fWKomibQ8tc';
+    return 'idehdzFDKcnizix3YGrBs1T1JP5YFZaCrGeKJeuYZ62';
   })(),
   usdcMint:
     process.env.USDC_MINT || '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
   susdcMint: process.env.SUSDC_MINT || null,
 
-  // DIRM 参数 (1e6 定点)
+  // DIRM params (1e6 fixed point)
   amplification: 30,
   k: 30_000_000, // 30.0
   r_max: 50_000, // 0.05 = 5%
@@ -49,30 +48,30 @@ function log(msg, color = '') {
   console.log(`${c[color] || ''}${msg}${c.reset}`);
 }
 
-// Anchor 全局函数 sighash
+// Anchor global function sighash
 function sighash(name) {
   return crypto.createHash('sha256').update(`global:${name}`).digest().slice(0, 8);
 }
 
 async function main() {
-  log('\n=== DIRM 池初始化 ===\n', 'yellow');
+  log('\n=== DIRM Pool Initialization ===\n', 'yellow');
 
-  // 1. 获取 sUSDC mint
+  // 1. Resolve sUSDC mint
   let susdcMint = CONFIG.susdcMint;
   if (!susdcMint) {
     const infoPath = path.join(__dirname, '../susdc-token-info.json');
     if (fs.existsSync(infoPath)) {
       const info = JSON.parse(fs.readFileSync(infoPath, 'utf-8'));
       susdcMint = info.mintAddress;
-      log(`从 susdc-token-info.json 读取 sUSDC Mint: ${susdcMint}`);
+      log(`Loaded sUSDC mint from susdc-token-info.json: ${susdcMint}`);
     } else {
-      log('错误: 请先运行 node scripts/create-susdc.js 创建 sUSDC', 'red');
-      log('或设置环境变量 SUSDC_MINT', 'red');
+      log('Error: run node scripts/create-susdc.js to create sUSDC first', 'red');
+      log('Or set environment variable SUSDC_MINT', 'red');
       process.exit(1);
     }
   }
 
-  // 2. 加载 keypair 与连接
+  // 2. Load keypair and create connection
   const keypairData = JSON.parse(fs.readFileSync(CONFIG.keypairPath, 'utf-8'));
   const keypair = Keypair.fromSecretKey(Uint8Array.from(keypairData));
 
@@ -81,7 +80,7 @@ async function main() {
   const usdcMintPk = new PublicKey(CONFIG.usdcMint);
   const susdcMintPk = new PublicKey(susdcMint);
 
-  // 3. 计算 PDA
+  // 3. Derive PDAs
   const [poolPda] = PublicKey.findProgramAddressSync(
     [Buffer.from('pool'), usdcMintPk.toBuffer(), susdcMintPk.toBuffer()],
     programId
@@ -112,11 +111,11 @@ async function main() {
   const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
 
   // Step 1: initialize_pool
-  log('\n1. 调用 initialize_pool...', 'yellow');
+  log('\n1. Calling initialize_pool...', 'yellow');
   try {
     const poolInfo = await connection.getAccountInfo(poolPda);
     if (poolInfo) {
-      log('  Pool 已存在，跳过 initialize_pool', 'yellow');
+      log('  Pool already exists, skip initialize_pool', 'yellow');
     } else {
       // data: sighash + amplification + k + r_max + tau (u64 LE)
       const bufA = Buffer.alloc(8);
@@ -156,19 +155,19 @@ async function main() {
         skipPreflight: false,
       });
       await connection.confirmTransaction(sig, 'confirmed');
-      log(`  initialize_pool 交易: ${sig}`, 'green');
+      log(`  initialize_pool signature: ${sig}`, 'green');
     }
   } catch (e) {
-    log(`  initialize_pool 失败: ${e.message}`, 'red');
+    log(`  initialize_pool failed: ${e.message}`, 'red');
     throw e;
   }
 
   // Step 2: initialize_vaults
-  log('\n2. 调用 initialize_vaults...', 'yellow');
+  log('\n2. Calling initialize_vaults...', 'yellow');
   try {
     const vaultInfo = await connection.getAccountInfo(usdcVaultPda);
     if (vaultInfo) {
-      log('  Vaults 已存在，跳过 initialize_vaults', 'yellow');
+      log('  Vaults already exist, skip initialize_vaults', 'yellow');
     } else {
       const data = sighash('initialize_vaults');
 
@@ -195,14 +194,14 @@ async function main() {
         skipPreflight: false,
       });
       await connection.confirmTransaction(sig, 'confirmed');
-      log(`  initialize_vaults 交易: ${sig}`, 'green');
+      log(`  initialize_vaults signature: ${sig}`, 'green');
     }
   } catch (e) {
-    log(`  initialize_vaults 失败: ${e.message}`, 'red');
+    log(`  initialize_vaults failed: ${e.message}`, 'red');
     throw e;
   }
 
-  log('\n=== 池子初始化完成 ===', 'green');
+  log('\n=== Pool initialization complete ===', 'green');
   log(`Pool: ${poolPda.toBase58()}`);
   log(`USDC: ${CONFIG.usdcMint} | sUSDC: ${susdcMint}`);
 }

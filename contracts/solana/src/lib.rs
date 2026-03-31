@@ -21,7 +21,7 @@ pub use bridge::*;
 pub use revenue::*;
 
 // Program ID (replace when deploying)
-declare_id!("125eQs1s3SNxd5KFRpAJ6JvtVpD4tRYw6fWKomibQ8tc");
+declare_id!("GmfLWKJuTgyaNvro91Vd8mwg8BXccgXS3jZ4WTjsAan5");
 
 #[program]
 pub mod seth_bridge {
@@ -52,6 +52,17 @@ pub mod seth_bridge {
         handle_mark_cross_chain_completed(ctx, seth_tx_hash)
     }
 
+    /// Relayer unlocks USDC on Solana for Seth->Solana bridge-back
+    pub fn unlock_from_seth(
+        ctx: Context<UnlockFromSeth>,
+        bridge_address: [u8; 20],
+        request_id: u64,
+        amount: u64,
+        seth_tx_hash: [u8; 32],
+    ) -> Result<()> {
+        handle_unlock_from_seth(ctx, bridge_address, request_id, amount, seth_tx_hash)
+    }
+
     /// Set Relayer
     pub fn set_relayer(ctx: Context<SetRelayer>, new_relayer: Pubkey) -> Result<()> {
         handle_set_relayer(ctx, new_relayer)
@@ -68,10 +79,9 @@ pub mod seth_bridge {
     pub fn process_revenue(
         ctx: Context<ProcessRevenue>,
         amount: u64,
-        product_type: u8,
         seth_recipient: [u8; 20],
     ) -> Result<()> {
-        handle_process_revenue(ctx, amount, product_type, seth_recipient)
+        handle_process_revenue(ctx, amount, seth_recipient)
     }
 
     /// Distribute commission to referrer

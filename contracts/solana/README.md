@@ -23,9 +23,9 @@ solana --version
 # Using AVM (Anchor Version Manager)
 cargo install --git https://github.com/coral-xyz/anchor avm --locked --force
 
-# Install latest version
-avm install 0.29.0
-avm use 0.29.0
+# Install a version matching Cargo.toml (e.g. 0.32.x for this repo)
+avm install 0.32.1
+avm use 0.32.1
 
 # Verify installation
 anchor --version
@@ -37,6 +37,36 @@ anchor --version
 cd contracts/solana
 npm install
 ```
+
+### WSL (Windows)
+
+Install tooling **inside WSL** (Ubuntu, etc.), not only on Windows. Match **Anchor** to this workspace (`anchor-lang` **0.32.x** in `Cargo.toml`), e.g. `avm install 0.32.1` and `avm use 0.32.1` after installing [AVM](https://www.anchor-lang.com/docs/installation).
+
+**One-shot devnet deploy** (adjust drive letter `d` if your repo is elsewhere):
+
+```bash
+cd /mnt/d/code/blockchain/iPoW-Stack/Seth-AI-ecosystem/contracts/solana
+
+# Point CLI at devnet (airdrop / balance); deploy still uses RPC from Anchor.toml
+solana config set --url devnet
+solana config set --keypair ./deployer-keypair.json
+
+solana-keygen pubkey ./deployer-keypair.json   # note address
+solana airdrop 2 <PASTE_ADDRESS_HERE>          # repeat if "insufficient funds"
+
+npm install
+npm run deploy:devnet:init
+```
+
+`deploy:devnet:init` runs `anchor build`, `anchor deploy` (both programs), writes `deployment-info.json`, then `initialize-bridge.js`.
+
+Use the same `deployer-keypair.json` and `target/deploy/*-keypair.json` as on Windows — paths like `/mnt/d/...` are the same files as `D:\...`.
+
+**Where “deployment memory” lives**
+
+- This chat does **not** remember past deployments. Keep a record yourself.
+- After a successful run, `deployment-info.json` is written in this directory. Commit it (or a redacted copy) if you want the repo to remember program IDs for your team.
+- On-chain truth: `solana program show <PROGRAM_ID>` on the RPC you use.
 
 ## Configuration
 
@@ -97,42 +127,30 @@ anchor keys list
 # Update program ID in Anchor.toml and src/lib.rs
 ```
 
-### Step 3: Deploy Program
+### Step 3: Deploy programs (dev)
+
+`Anchor.toml` sets the RPC (e.g. Helius devnet). Deploy **seth_bridge** and **dirm** and write `deployment-info.json`:
 
 ```bash
-# Deploy to devnet
-anchor deploy --provider.cluster devnet
+# Build + deploy both programs; optional: --init runs bridge initialize on-chain
+npm run deploy:devnet
+npm run deploy:devnet:init
 
-# Deploy to mainnet
-# anchor deploy --provider.cluster mainnet
-```
-
-### Step 4: Create DIRM Token
-
-```bash
-# Create DIRM token
-npm run dirm:create
-
-# Or run manually
-node scripts/create-dirm.js
-```
-
-Example output:
-```
-DIRM Mint: xxxxx...
-Deployer account: xxxxx...
-```
-
-### Step 5: Full Deployment (Optional)
-
-Run the full deployment script, including:
-- Create DIRM token
-- Create necessary accounts
-- Initialize Bridge
-
-```bash
+# Equivalent to npm run deploy:devnet:init
 npm run deploy:full
 ```
+
+Or manually:
+
+```bash
+anchor build
+anchor deploy
+node scripts/initialize-bridge.js
+```
+
+### Step 4: Pool / sUSDC (optional)
+
+`npm run pool:init` initializes the DIRM pool on-chain. It needs `SUSDC_MINT` or a `susdc-token-info.json` at the repo root (see `initialize-pool.js`).
 
 ## Revenue Distribution Configuration
 
@@ -270,8 +288,9 @@ contracts/solana/
 │   ├── bridge.rs            # Bridge module
 │   └── revenue.rs           # Revenue distribution module
 ├── scripts/
-│   ├── deploy.js            # Full deployment script
-│   └── create-dirm.js       # DIRM token creation script
+│   ├── deploy-devnet.js     # Build, deploy, write deployment-info.json; --init for bridge
+│   ├── initialize-bridge.js
+│   └── initialize-pool.js
 └── target/                   # Build output
     ├── deploy/
     ├── idl/

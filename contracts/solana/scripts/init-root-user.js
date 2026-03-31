@@ -1,18 +1,18 @@
 /**
- * 初始化根用户脚本
+ * Root user initialization script
  *
- * 作用：
- * - 为合约 owner 创建 UserInfo 账户（无需 referrer）
- * - 这是一级 referrer 必须的解决方案
- * - 只有 owner 可以调用此指令
+ * Purpose:
+ * - Creates UserInfo for contract owner (no referrer required)
+ * - Provides the first-level referrer bootstrap
+ * - Only owner can call this instruction
  *
- * 用法：
- *   在 contracts/solana 目录下执行：
+ * Usage:
+ *   Run in contracts/solana:
  *     node scripts/init-root-user.js
  *
- * 前置条件：
- *   - 合约已部署并 initialize 完成
- *   - deployer-keypair.json 中的地址是 owner
+ * Prerequisites:
+ *   - Program has been deployed and initialized
+ *   - Address in deployer-keypair.json is the owner
  */
 
 const {
@@ -33,7 +33,7 @@ function sighash(name) {
 
 async function main() {
   console.log('========================================');
-  console.log('初始化根用户 (init_root_user)');
+  console.log('Initialize root user (init_root_user)');
   console.log('========================================\n');
 
   const rpcUrl = process.env.RPC_URL || 'https://devnet.helius-rpc.com/?api-key=453899d1-2296-4503-b3df-fcc3c64436bc';
@@ -50,18 +50,18 @@ async function main() {
   const balance = await connection.getBalance(owner.publicKey);
   console.log('SOL balance:', balance / 1e9, 'SOL\n');
 
-  // 1. 读取部署信息
+  // 1. Load deployment info
   // const deployInfoPath = path.join(__dirname, '../deployment-info.json');
   // if (!fs.existsSync(deployInfoPath)) {
-  //   throw new Error('deployment-info.json 不存在，请先部署合约');
+  //   throw new Error('deployment-info.json not found; deploy contract first');
   // }
   // const deployInfo = JSON.parse(fs.readFileSync(deployInfoPath, 'utf-8'));
   // const programId = new PublicKey(deployInfo.programId || deployInfo.sethBridgeProgramId);
 
-  const programId = new PublicKey("125eQs1s3SNxd5KFRpAJ6JvtVpD4tRYw6fWKomibQ8tc");
+  const programId = new PublicKey("GmfLWKJuTgyaNvro91Vd8mwg8BXccgXS3jZ4WTjsAan5");
   console.log('Program ID:', programId.toBase58());
 
-  // 2. 计算 PDA
+  // 2. Derive PDAs
   const [configPda] = PublicKey.findProgramAddressSync([Buffer.from('config')], programId);
   const [userInfoPda] = PublicKey.findProgramAddressSync(
     [Buffer.from('user_info'), owner.publicKey.toBuffer()],
@@ -71,14 +71,14 @@ async function main() {
   console.log('Config PDA:', configPda.toBase58());
   console.log('UserInfo PDA:', userInfoPda.toBase58());
 
-  // 3. 检查 UserInfo 是否已存在
+  // 3. Check whether UserInfo already exists
   const existingUserInfo = await connection.getAccountInfo(userInfoPda);
   if (existingUserInfo) {
-    console.log('\n✅ 根用户已存在，无需初始化');
+    console.log('\nRoot user already exists, nothing to initialize.');
     return;
   }
 
-  // 4. 构造指令
+  // 4. Build instruction
   const data = sighash('init_root_user');
 
   const keys = [
@@ -91,16 +91,16 @@ async function main() {
   const ix = new TransactionInstruction({ programId, keys, data });
   const tx = new Transaction().add(ix);
 
-  // 5. 发送交易
-  console.log('\n发送 init_root_user 交易...');
+  // 5. Send transaction
+  console.log('\nSending init_root_user transaction...');
   try {
     const sig = await connection.sendTransaction(tx, [owner], { skipPreflight: false });
-    console.log('交易签名:', sig);
+    console.log('Transaction signature:', sig);
     await connection.confirmTransaction(sig);
-    console.log('✅ 根用户初始化成功！');
-    console.log('\n现在其他用户可以使用此地址作为 referrer 进行注册。');
+    console.log('Root user initialized successfully.');
+    console.log('\nOther users can now use this address as referrer.');
   } catch (err) {
-    console.log('❌ 初始化失败:', err.message);
+    console.log('Initialization failed:', err.message);
     throw err;
   }
 }
@@ -108,6 +108,6 @@ async function main() {
 main()
   .then(() => process.exit(0))
   .catch((err) => {
-    console.error('\n❌ 失败:', err.message || err);
+    console.error('\nFailed:', err.message || err);
     process.exit(1);
   });

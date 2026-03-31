@@ -10,7 +10,7 @@ use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 use crate::{
     Config, VaultAuthority, UserInfo, CrossChainMessage, CrossChainStatus,
-    COMMISSION_L1_RATE, COMMISSION_L2_RATE, TEAM_INCENTIVE_RATE, 
+    COMMISSION_L1_RATE, COMMISSION_L2_RATE,
     PROJECT_RESERVE_RATE, ECOSYSTEM_RATE, BASIS_POINTS,
 };
 use crate::{BridgeError};
@@ -22,7 +22,7 @@ use crate::bridge::transfer_from_vault;
 /// Process revenue and execute distribution
 /// L1/L2 commissions are recorded and distributed via separate instruction
 #[derive(Accounts)]
-#[instruction(amount: u64, product_type: u8, seth_recipient: [u8; 20])]
+#[instruction(amount: u64, seth_recipient: [u8; 20])]
 pub struct ProcessRevenue<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
@@ -82,7 +82,6 @@ pub struct ProcessRevenue<'info> {
 pub fn handle_process_revenue(
     ctx: Context<ProcessRevenue>,
     amount: u64,
-    product_type: u8,
     seth_recipient: [u8; 20],
 ) -> Result<()> {
     require!(amount > 0, BridgeError::ZeroAmount);
@@ -100,10 +99,9 @@ pub fn handle_process_revenue(
         amount,
     )?;
 
-    // 2. Calculate each portion (10-5-5-50-30)
+    // 2. Calculate each portion (10-5-0-50-35)
     let commission_l1 = (amount * COMMISSION_L1_RATE) / BASIS_POINTS;
     let commission_l2 = (amount * COMMISSION_L2_RATE) / BASIS_POINTS;
-    let team_funds = (amount * TEAM_INCENTIVE_RATE) / BASIS_POINTS;
     let project_funds = (amount * PROJECT_RESERVE_RATE) / BASIS_POINTS;
     let ecosystem_funds = (amount * ECOSYSTEM_RATE) / BASIS_POINTS;
 
@@ -127,15 +125,13 @@ pub fn handle_process_revenue(
         )?;
     }
     
-    // 5. Record cross-chain message (30% ecosystem + 5% team)
+    // 5. Record cross-chain message (35% ecosystem)
     // Commissions L1/L2 will be distributed via separate distribute_commission instruction
     let cross_chain_msg = &mut ctx.accounts.cross_chain_message;
     cross_chain_msg.sender = ctx.accounts.user.key();
     cross_chain_msg.amount = ecosystem_funds;
     cross_chain_msg.original_amount = amount;
-    cross_chain_msg.team_funds = team_funds;
     cross_chain_msg.seth_recipient = seth_recipient;
-    cross_chain_msg.product_type = product_type;
     cross_chain_msg.l1_referrer = l1_referrer;
     cross_chain_msg.l2_referrer = None;
     cross_chain_msg.commission_l1 = commission_l1;
@@ -156,12 +152,10 @@ pub fn handle_process_revenue(
         amount,
         commission_l1,
         commission_l2,
-        team_funds,
         project_funds,
         ecosystem_funds,
         l1_referrer,
         l2_referrer: None,
-        product_type,
         seth_recipient,
         timestamp: Clock::get()?.unix_timestamp,
     });
@@ -297,7 +291,7 @@ pub fn handle_withdraw_commission(ctx: Context<WithdrawCommission>) -> Result<()
 
 // ==================== Monthly Settlement ====================
 
-/// Manually trigger monthly settlement (legacy, team funds now cross-chain)
+/// Manually trigger monthly settlement (project reserve only)
 #[derive(Accounts)]
 pub struct TriggerSettlement<'info> {
     pub owner: Signer<'info>,
@@ -332,25 +326,23 @@ pub fn handle_trigger_settlement(ctx: Context<TriggerSettlement>) -> Result<()> 
     );
 
     let config = &mut ctx.accounts.config;
-    let team_funds = config.pending_team_funds;
-
-    require!(team_funds > 0, BridgeError::NoPendingFunds);
+    let project_funds = config.pending_project_funds;
+    require!(project_funds > 0, BridgeError::NoPendingFunds);
 
     transfer_from_vault(
         &ctx.accounts.vault_token_account.to_account_info(),
         &ctx.accounts.team_token_account.to_account_info(),
         &ctx.accounts.vault_authority.to_account_info(),
         &ctx.accounts.token_program.to_account_info(),
-        team_funds,
+        project_funds,
         config.bump,
     )?;
 
-    config.pending_team_funds = 0;
+    config.pending_project_funds = 0;
     config.last_settlement_timestamp = Clock::get()?.unix_timestamp;
 
     emit!(MonthlySettlement {
-        team_funds,
-        project_funds: 0,
+        project_funds,
         timestamp: Clock::get()?.unix_timestamp,
     });
 
