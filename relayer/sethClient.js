@@ -224,6 +224,39 @@ class SethClient {
     }
 
     /**
+     * Query Seth blocks by height range.
+     * Endpoint example:
+     *   /get_blocks?network=3&pool_index=13&height=0&count=1
+     */
+    async getBlocks(network, poolIndex, height, count = 1) {
+        try {
+            const params = new URLSearchParams();
+            params.append('network', String(Number(network)));
+            params.append('pool_index', String(Number(poolIndex)));
+            params.append('height', String(Number(height)));
+            params.append('count', String(Number(count)));
+
+            const axiosConfig = {
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                timeout: this.httpTimeoutMs,
+            };
+            if (this.proxy) {
+                axiosConfig.proxy = this.proxy;
+            }
+
+            const res = await axios.post(`${this.baseUrl}/get_blocks`, params, axiosConfig);
+            if (res.status !== 200) return null;
+            const data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+            if (!data || Number(data.status) !== 0) return null;
+            if (!Array.isArray(data.blocks)) return { blocks: [] };
+            return { blocks: data.blocks };
+        } catch (error) {
+            console.error(`[SethClient] get_blocks error: ${error.message}`);
+            return null;
+        }
+    }
+
+    /**
      * Strictly replicates the serialization logic of C++ GetTxMessageHash
      */
     computeHash(params) {
@@ -314,6 +347,7 @@ class SethClient {
         const currentNonce = await this.getLatestNonce(nonceQueryAddress);
         const nextNonce = currentNonce + 1;
         // Merge params with defaults
+        const DEFAULT_CONTRACT_PREPAYMENT = 100_000_000;
         const finalParams = {
             amount: 0,
             gas_limit: 100000,
@@ -330,6 +364,9 @@ class SethClient {
             nonce: nextNonce,
             pubkey: pubKeyHex
         };
+        if (finalParams.step === 8 && !Object.prototype.hasOwnProperty.call(txParams, 'prepayment')) {
+            finalParams.prepayment = DEFAULT_CONTRACT_PREPAYMENT;
+        }
 
         // --- 3. Compute Hash ---
         const txHash = this.computeHash(finalParams);
@@ -556,75 +593,12 @@ class SethClient {
         return Number(this._decodeUint256(out, 0));
     }
 
-    async getWithdrawRequest(fromHex, contractAddress, requestId) {
-        const arg = BigInt(requestId).toString(16).padStart(64, '0');
-        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-        const qWord = async (signature, attempts = 3) => {
-            const input = this._functionSelector(signature) + arg;
-            for (let i = 0; i < attempts; i++) {
-                const res = await this.queryContract(fromHex, contractAddress, input);
-                const out = this._extractHexOutput(res);
-                if (out && out.length >= 64) return out;
-                if (i < attempts - 1) await sleep(200 * (i + 1));
-            }
-            return null;
-        };
-
-        const decodeBoolWord = (w) => this._decodeUint256(w, 0) !== 0n;
-
-        // New preferred lock-style getters (Seth side aligned with Solana lock semantics).
-        const [lUserW, lRecipW, lAmountW, lCreatedW, lProcessedW] = await Promise.all([
-            qWord('lockRequestUser(uint256)'),
-            qWord('lockRequestSolanaRecipient(uint256)'),
-            qWord('lockRequestSusdcAmount(uint256)'),
-            qWord('lockRequestCreatedAt(uint256)'),
-            qWord('lockRequestProcessed(uint256)'),
-        ]);
-
-        if (lUserW && lRecipW && lAmountW && lCreatedW && lProcessedW) {
-            return {
-                user: this._decodeAddress(lUserW, 0),
-                solanaRecipient: this._decodeBytes32(lRecipW, 0),
-                susdcAmount: this._decodeUint256(lAmountW, 0).toString(),
-                createdAt: Number(this._decodeUint256(lCreatedW, 0)),
-                processed: decodeBoolWord(lProcessedW),
-            };
-        }
-
-        // Prefer single-word getters to avoid multi-return query instability on Seth nodes.
-        const [userW, recipW, amountW, createdW, processedW] = await Promise.all([
-            qWord('withdrawRequestUser(uint256)'),
-            qWord('withdrawRequestSolanaRecipient(uint256)'),
-            qWord('withdrawRequestSusdcAmount(uint256)'),
-            qWord('withdrawRequestCreatedAt(uint256)'),
-            qWord('withdrawRequestProcessed(uint256)'),
-        ]);
-
-        if (userW && recipW && amountW && createdW && processedW) {
-            return {
-                user: this._decodeAddress(userW, 0),
-                solanaRecipient: this._decodeBytes32(recipW, 0),
-                susdcAmount: this._decodeUint256(amountW, 0).toString(),
-                createdAt: Number(this._decodeUint256(createdW, 0)),
-                processed: decodeBoolWord(processedW),
-            };
-        }
-
-        // Backward compatibility: older bridge contracts only expose tuple getter.
-        const selector = this._functionSelector('getWithdrawRequest(uint256)');
-        const input = selector + arg;
-        const res = await this.queryContract(fromHex, contractAddress, input);
-        const out = this._extractHexOutput(res);
-        // (address, bytes32, uint256, uint256, bool) — 5 ABI words
-        if (!out || out.length < 5 * 64) return null;
-
-        return {
-            user: this._decodeAddress(out, 0),
-            solanaRecipient: this._decodeBytes32(out, 1),
-            susdcAmount: this._decodeUint256(out, 2).toString(),
-            createdAt: Number(this._decodeUint256(out, 3)),
-            processed: this._decodeUint256(out, 4) !== 0n,
-        };
+    /**
+     * Withdraw request tuple / per-field getters — not used: Seth query_contract does not support them reliably.
+     * Relayer uses receipt events + block scan only.
+     */
+    async getWithdrawRequest(_fromHex, _contractAddress, _requestId) {
+        return null;
     }
 
     async getWithdrawRequestKey(fromHex, contractAddress, requestId) {

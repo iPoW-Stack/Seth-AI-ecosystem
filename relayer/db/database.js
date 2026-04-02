@@ -287,9 +287,13 @@ class Database {
             },
         };
         
-        result.rows.forEach(row => {
-            stats[row.status] = parseInt(row.count);
-            stats.total += parseInt(row.count);
+        const messageRows = Array.isArray(result) ? result : (result?.rows || []);
+        messageRows.forEach(row => {
+            const count = parseInt(row.count, 10) || 0;
+            if (stats[row.status] !== undefined) {
+                stats[row.status] = count;
+            }
+            stats.total += count;
         });
 
         const wq = await this._query(`
@@ -297,11 +301,13 @@ class Database {
             FROM seth_withdraw_requests
             GROUP BY status
         `);
-        wq.rows.forEach(row => {
+        const withdrawRows = Array.isArray(wq) ? wq : (wq?.rows || []);
+        withdrawRows.forEach(row => {
+            const count = parseInt(row.count, 10) || 0;
             if (stats.withdraw[row.status] !== undefined) {
-                stats.withdraw[row.status] = row.count;
+                stats.withdraw[row.status] = count;
             }
-            stats.withdraw.total += row.count;
+            stats.withdraw.total += count;
         });
         
         return stats;
@@ -352,6 +358,26 @@ class Database {
             LIMIT 1
         `;
         await this._query(query, [isActive]);
+    }
+
+    async getSethSyncHeight(network, poolIndex) {
+        const rows = await this._query(
+            `SELECT * FROM seth_sync_heights WHERE network = ? AND pool_index = ? LIMIT 1`,
+            [Number(network), Number(poolIndex)]
+        );
+        return rows[0] || null;
+    }
+
+    async upsertSethSyncHeight(network, poolIndex, nextHeight) {
+        const query = `
+            INSERT INTO seth_sync_heights (network, pool_index, next_height)
+            VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+                next_height = VALUES(next_height),
+                updated_at = NOW()
+        `;
+        await this._query(query, [Number(network), Number(poolIndex), Number(nextHeight)]);
+        return this.getSethSyncHeight(network, poolIndex);
     }
 
     // ==================== Operation Logs ====================
@@ -434,6 +460,17 @@ class Database {
 
     async markSethWithdrawProcessing(bridgeAddress, requestId, req) {
         return this.upsertSethWithdrawRequest(bridgeAddress, requestId, req, 'processing');
+    }
+
+    async setSethWithdrawInitiatingTxHash(bridgeAddress, requestId, txHash) {
+        const query = `
+            UPDATE seth_withdraw_requests
+            SET initiating_seth_tx_hash = COALESCE(?, initiating_seth_tx_hash),
+                updated_at = NOW()
+            WHERE bridge_address = ? AND request_id = ?
+        `;
+        await this._query(query, [txHash || null, bridgeAddress, requestId]);
+        return this.getSethWithdrawByRequestId(bridgeAddress, requestId);
     }
 
     async markSethWithdrawCompleted(bridgeAddress, requestId, solanaUnlockTxSig, sethMarkProcessedTxHash) {

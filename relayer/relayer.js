@@ -26,6 +26,9 @@ const PROCESS_REVENUE_INSTRUCTION_DISCRIMINATOR = crypto
     .update('global:process_revenue')
     .digest()
     .subarray(0, 8);
+const LOCK_TO_SOLANA_REQUESTED_TOPIC0 = createKeccakHash('keccak256')
+    .update('LockToSolanaRequested(uint256,address,bytes32,uint256,bytes32)')
+    .digest('hex');
 
 // ==================== Configuration ====================
 const CONFIG = {
@@ -35,6 +38,7 @@ const CONFIG = {
         programId: process.env.SOLANA_PROGRAM_ID,
         relayerKeypairPath: process.env.SOLANA_RELAYER_KEYPAIR || '',
         usdcMint: process.env.SOLANA_USDC_MINT || '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
+        enableListener: String(process.env.ENABLE_SOLANA_TO_SETH || 'true').toLowerCase() === 'true',
         commitment: 'confirmed',
         pollInterval: parseInt(process.env.SOLANA_POLL_INTERVAL) || 5000,
         proxy: process.env.SOLANA_HTTP_PROXY || process.env.SOLANA_PROXY || null,
@@ -52,6 +56,11 @@ const CONFIG = {
             process.env.SETH_INJECT_SETH || process.env.SETH_INJECT_NATIVE_WEI || '0',
         reversePollInterval: parseInt(process.env.SETH_REVERSE_POLL_INTERVAL) || 15000,
         enableReverseRelay: String(process.env.ENABLE_SETH_TO_SOLANA || 'false').toLowerCase() === 'true',
+        network: parseInt(process.env.SETH_NETWORK || '3', 10),
+        /** Scan Seth blocks for each pool in [poolIndexMin, poolIndexMax] (inclusive). */
+        poolIndexMin: parseInt(process.env.SETH_POOL_INDEX_MIN ?? '0', 10),
+        poolIndexMax: parseInt(process.env.SETH_POOL_INDEX_MAX ?? '32', 10),
+        blockBatchSize: parseInt(process.env.SETH_BLOCK_BATCH_SIZE || '5', 10),
     },
     // Database Configuration
     database: {
@@ -86,7 +95,6 @@ class BridgeRelayer {
         this.retryTimer = null;
         this.pollTimer = null;
         this.sethReverseTimer = null;
-        this.lastSeenWithdrawRequestId = 0;
         this.stats = {
             totalProcessed: 0,
             totalFailed: 0,
@@ -148,6 +156,13 @@ class BridgeRelayer {
             relayerAddress: this.relayerAddress
         });
 
+        const pMin = CONFIG.seth.poolIndexMin;
+        const pMax = CONFIG.seth.poolIndexMax;
+        if (!Number.isFinite(pMin) || !Number.isFinite(pMax) || pMin > pMax) {
+            throw new Error(`Invalid SETH_POOL_INDEX_MIN/MAX: ${pMin}..${pMax}`);
+        }
+        console.log(`[Relayer] Seth block scan pools: ${pMin}..${pMax} (network=${CONFIG.seth.network})`);
+
         console.log('[Relayer] Initialization complete');
     }
 
@@ -164,12 +179,18 @@ class BridgeRelayer {
         this.isShuttingDown = false;
         
         console.log('[Relayer] Starting...');
-        console.log(`[Relayer] Listening to Solana Program: ${CONFIG.solana.programId}`);
+        if (CONFIG.solana.enableListener) {
+            console.log(`[Relayer] Listening to Solana Program: ${CONFIG.solana.programId}`);
+        } else {
+            console.log('[Relayer] Solana->Seth listener disabled (ENABLE_SOLANA_TO_SETH=false)');
+        }
 
         await this.db.setRelayerActive(true);
 
-        // Start Solana event listener
-        this.startSolanaListener();
+        // Start Solana event listener (optional for outbound-only runs)
+        if (CONFIG.solana.enableListener) {
+            this.startSolanaListener();
+        }
 
         // Start retry scheduler
         this.startRetryScheduler();
@@ -242,68 +263,117 @@ class BridgeRelayer {
      */
     async pollSethWithdrawRequests() {
         try {
-            const total = await this.sethClient.getTotalWithdrawRequests(
-                this.relayerAddress,
-                CONFIG.seth.bridgeAddress
-            );
-            if (!Number.isFinite(total) || total <= this.lastSeenWithdrawRequestId) return;
-            
-            for (let requestId = this.lastSeenWithdrawRequestId + 1; requestId <= total; requestId++) {
+            const net = CONFIG.seth.network;
+            const pMin = CONFIG.seth.poolIndexMin;
+            const pMax = CONFIG.seth.poolIndexMax;
+            let anyBlocksFetched = false;
+
+            for (let poolIdx = pMin; poolIdx <= pMax; poolIdx++) {
                 if (this.isShuttingDown) break;
 
-                const gate = await this.db.getSethWithdrawByRequestId(CONFIG.seth.bridgeAddress, requestId);
-                if (
-                    gate &&
-                    gate.status === 'pending' &&
-                    gate.retry_count > 0 &&
-                    gate.next_retry_at &&
-                    new Date(gate.next_retry_at) > new Date()
-                ) {
-                    console.log(
-                        `[Relayer] Withdraw request #${requestId} in retry backoff until ${gate.next_retry_at}`
-                    );
+                let sync = await this.db.getSethSyncHeight(net, poolIdx);
+                if (!sync) {
+                    await this.db.upsertSethSyncHeight(net, poolIdx, 0);
+                    sync = await this.db.getSethSyncHeight(net, poolIdx);
+                }
+                if (!sync || sync.next_height == null) {
                     continue;
                 }
 
-                const req = await this.sethClient.getWithdrawRequest(
-                    this.relayerAddress,
-                    CONFIG.seth.bridgeAddress,
-                    requestId
+                let scanHeight = Number(sync.next_height);
+                const batch = await this.sethClient.getBlocks(
+                    net,
+                    poolIdx,
+                    scanHeight,
+                    CONFIG.seth.blockBatchSize
                 );
-                if (!req) {
-                    console.warn(
-                        `[Relayer] getWithdrawRequest returned null for id=${requestId} (Seth query may have failed); will retry`
-                    );
-                    const failedRow = await this.db.markSethWithdrawFailed(
-                        CONFIG.seth.bridgeAddress,
-                        requestId,
-                        'getWithdrawRequest returned null (query failed or HTTP 500)',
-                        CONFIG.relayer.maxRetries
-                    );
-                    // Skip permanently bad historical ids so newer requests can still flow.
-                    if (
-                        failedRow &&
-                        Number(failedRow.retry_count) >= Number(failedRow.max_retries || CONFIG.relayer.maxRetries)
-                    ) {
-                        console.warn(
-                            `[Relayer] Skip stuck withdraw request #${requestId} after max retries, continue with newer ids`
-                        );
-                        this.lastSeenWithdrawRequestId = requestId;
-                        continue;
-                    }
-                    // For transient errors, keep cursor in place and retry later.
-                    break;
-                }
-                if (req.user === '0x0000000000000000000000000000000000000000') continue;
-                if (req.processed) {
-                    await this.db.upsertSethWithdrawRequest(CONFIG.seth.bridgeAddress, requestId, req, 'completed');
-                    await this.db.markSethWithdrawCompleted(CONFIG.seth.bridgeAddress, requestId, null, null);
-                    this.lastSeenWithdrawRequestId = requestId;
+                if (!batch || !Array.isArray(batch.blocks)) {
                     continue;
                 }
-                
-                await this.handleSethWithdrawRequest(requestId, req);
-                this.lastSeenWithdrawRequestId = requestId;
+                if (batch.blocks.length === 0) {
+                    continue;
+                }
+
+                anyBlocksFetched = true;
+
+                for (const blockWrap of batch.blocks) {
+                    if (this.isShuttingDown) break;
+                    const blockInfo = blockWrap?.blockInfo;
+                    const txList = Array.isArray(blockInfo?.txList) ? blockInfo.txList : [];
+                    const blockHeight = Number(blockInfo?.height ?? scanHeight);
+
+                    for (const tx of txList) {
+                        if (!this._isBridgeToAddress(tx?.to)) continue;
+                        const txHash = this._extractTxHashFromBlockTx(tx);
+                        if (!txHash) continue;
+
+                        const parsed = await this._extractWithdrawFromReceiptEvent(txHash, null);
+                        if (!parsed) continue;
+
+                        const receipt = await this.sethClient.getTxReceipt(txHash);
+                        const events = receipt?.raw?.events;
+                        let requestId = null;
+                        if (Array.isArray(events)) {
+                            for (const ev of events) {
+                                const p = this._parseWithdrawEvent(ev, null);
+                                if (p) {
+                                    requestId = p.requestId;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!Number.isFinite(requestId)) continue;
+
+                        const gate = await this.db.getSethWithdrawByRequestId(CONFIG.seth.bridgeAddress, requestId);
+                        if (gate?.status === 'completed') continue;
+                        if (
+                            gate &&
+                            gate.status === 'pending' &&
+                            gate.retry_count > 0 &&
+                            gate.next_retry_at &&
+                            new Date(gate.next_retry_at) > new Date()
+                        ) {
+                            continue;
+                        }
+
+                        const existingRow = await this.db.getSethWithdrawByRequestId(CONFIG.seth.bridgeAddress, requestId);
+                        const upserted = await this.db.upsertSethWithdrawRequest(
+                            CONFIG.seth.bridgeAddress,
+                            requestId,
+                            parsed,
+                            'pending'
+                        );
+                        await this.db.setSethWithdrawInitiatingTxHash(
+                            CONFIG.seth.bridgeAddress,
+                            requestId,
+                            txHash
+                        );
+                        if (!existingRow && upserted) {
+                            await this.db.logWithdrawOperation(upserted.id, 'detect', {
+                                requestId,
+                                source: 'seth_block_scan',
+                                poolIndex: poolIdx,
+                                txHash,
+                                blockHeight,
+                            });
+                        }
+
+                        try {
+                            await this.handleSethWithdrawRequest(requestId, parsed);
+                        } catch (e) {
+                            console.error(
+                                `[Relayer] Error handling scanned withdraw request #${requestId}: ${e.message}`
+                            );
+                        }
+                    }
+
+                    scanHeight = blockHeight + 1;
+                    await this.db.upsertSethSyncHeight(net, poolIdx, scanHeight);
+                }
+            }
+
+            if (!anyBlocksFetched) {
+                await this.sleep(1000);
             }
         } catch (error) {
             console.error('[Relayer] Error polling Seth withdraw requests:', error.message);
@@ -774,7 +844,8 @@ class BridgeRelayer {
     decodeProgramInstructionData(dataStr) {
         if (typeof dataStr !== 'string' || dataStr.length === 0) return null;
         try {
-            return bs58.decode(dataStr);
+            // bs58.decode returns Uint8Array; normalize to Buffer for .equals/readBigUInt64LE usage.
+            return Buffer.from(bs58.decode(dataStr));
         } catch {}
         try {
             return Buffer.from(dataStr, 'base64');
@@ -809,6 +880,100 @@ class BridgeRelayer {
         });
 
         return hasProcessRevenueIx;
+    }
+
+    _decodeSethTopicHex(topicBase64) {
+        try {
+            const b = Buffer.from(String(topicBase64 || ''), 'base64');
+            if (b.length !== 32) return null;
+            return b.toString('hex');
+        } catch {
+            return null;
+        }
+    }
+
+    _extractTxHashFromBlockTx(tx) {
+        if (!tx || typeof tx !== 'object') return null;
+        const candidates = [tx.hash, tx.txHash, tx.tx_hash, tx.gid, tx.id];
+        for (const c of candidates) {
+            if (!c) continue;
+            const raw = String(c).trim();
+            const hex = raw.replace(/^0x/, '').toLowerCase();
+            if (/^[0-9a-f]{64}$/.test(hex)) return `0x${hex}`;
+            try {
+                const b = Buffer.from(raw, 'base64');
+                if (b.length === 32) {
+                    return `0x${b.toString('hex')}`;
+                }
+            } catch {}
+        }
+        return null;
+    }
+
+    _isBridgeToAddress(base64To) {
+        const bridgeHex = String(CONFIG.seth.bridgeAddress || '').replace(/^0x/, '').toLowerCase();
+        if (!/^[0-9a-f]{40}$/.test(bridgeHex)) return false;
+        try {
+            const b64 = Buffer.from(bridgeHex, 'hex').toString('base64');
+            return String(base64To || '').trim() === b64;
+        } catch {
+            return false;
+        }
+    }
+
+    _parseWithdrawEvent(ev, expectedRequestId) {
+        if (!Array.isArray(ev?.topics) || ev.topics.length < 4) return null;
+        const topic0 = this._decodeSethTopicHex(ev.topics[0]);
+        if (!topic0 || topic0 !== LOCK_TO_SOLANA_REQUESTED_TOPIC0) return null;
+
+        const idHex = this._decodeSethTopicHex(ev.topics[1]);
+        const userWord = this._decodeSethTopicHex(ev.topics[2]);
+        const recipWord = this._decodeSethTopicHex(ev.topics[3]);
+        if (!idHex || !userWord || !recipWord) return null;
+
+        const requestId = Number(BigInt(`0x${idHex}`));
+        if (Number.isFinite(expectedRequestId) && requestId !== Number(expectedRequestId)) return null;
+
+        let dataHex = '';
+        try {
+            dataHex = Buffer.from(String(ev.data || ''), 'base64').toString('hex');
+        } catch {
+            dataHex = '';
+        }
+        if (dataHex.length < 64) return null;
+
+        const amount = BigInt(`0x${dataHex.slice(0, 64)}`).toString();
+        return {
+            requestId,
+            req: {
+                user: `0x${userWord.slice(24)}`,
+                solanaRecipient: `0x${recipWord}`,
+                susdcAmount: amount,
+                createdAt: 0,
+                processed: false,
+            },
+        };
+    }
+
+    async _extractWithdrawFromReceiptEvent(txHash, expectedRequestId) {
+        const normalizedTxHash = String(txHash || '').trim();
+        if (!normalizedTxHash) return null;
+
+        // Seth RPC can be flaky; retry receipt fetching before giving up.
+        for (let attempt = 0; attempt < 5; attempt++) {
+            const receipt = await this.sethClient.getTxReceipt(normalizedTxHash);
+            const events = receipt?.raw?.events;
+            if (Array.isArray(events) && events.length > 0) {
+                for (const ev of events) {
+                    const parsed = this._parseWithdrawEvent(ev, expectedRequestId);
+                    if (parsed) {
+                        return parsed.req;
+                    }
+                }
+            }
+            await this.sleep(400 * (attempt + 1));
+        }
+        return null;
     }
 
     /**
@@ -1076,16 +1241,27 @@ class BridgeRelayer {
             for (const w of withdrawRetries) {
                 if (this.isShuttingDown) break;
 
-                const req = await this.sethClient.getWithdrawRequest(
-                    this.relayerAddress,
-                    CONFIG.seth.bridgeAddress,
-                    w.request_id
-                );
-                if (!req) {
+                let req = {
+                    user: w.user_address || null,
+                    solanaRecipient: w.solana_recipient || null,
+                    susdcAmount: w.susdc_amount != null ? String(w.susdc_amount) : '0',
+                    createdAt: Number(w.created_at_onchain || 0),
+                    processed: Boolean(w.onchain_processed),
+                };
+                if (w.initiating_seth_tx_hash) {
+                    const byEvent = await this._extractWithdrawFromReceiptEvent(
+                        w.initiating_seth_tx_hash,
+                        w.request_id
+                    );
+                    if (byEvent) {
+                        req = byEvent;
+                    }
+                }
+                if (!req?.user || !req?.solanaRecipient || !req?.susdcAmount) {
                     await this.db.markSethWithdrawFailed(
                         CONFIG.seth.bridgeAddress,
                         w.request_id,
-                        'getWithdrawRequest returned null on retry',
+                        'retry row missing required withdraw fields',
                         CONFIG.relayer.maxRetries
                     );
                     continue;
