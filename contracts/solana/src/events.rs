@@ -40,17 +40,13 @@ pub struct SethUnlockProcessed {
 
 // ==================== Revenue Events ====================
 
-/// Revenue processed event (10-5-0-50-35 distribution)
+/// Revenue processed event.
+/// Inbound model: full passthrough to ecosystem funds.
 #[event]
 pub struct RevenueProcessed {
     pub user: Pubkey,
     pub amount: u64,
-    pub commission_l1: u64,
-    pub commission_l2: u64,
-    pub project_funds: u64,
     pub ecosystem_funds: u64,
-    pub l1_referrer: Option<Pubkey>,
-    pub l2_referrer: Option<Pubkey>,
     /// Seth recipient address (20 bytes EVM address)
     pub seth_recipient: [u8; 20],
     pub timestamp: i64,

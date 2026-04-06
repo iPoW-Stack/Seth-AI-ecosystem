@@ -68,17 +68,8 @@ async function main() {
   const [configPda] = PublicKey.findProgramAddressSync([Buffer.from('config')], programId);
   const [vaultAuthorityPda] = PublicKey.findProgramAddressSync([Buffer.from('vault_authority')], programId);
   const [vaultTokenPda] = PublicKey.findProgramAddressSync([Buffer.from('vault_token_account')], programId);
-  const [userInfoPda] = PublicKey.findProgramAddressSync([Buffer.from('user_info'), user.publicKey.toBuffer()], programId);
-
-  const [userInfoAcc, configAcc] = await Promise.all([
-    conn.getAccountInfo(userInfoPda),
-    conn.getAccountInfo(configPda),
-  ]);
-  if (!userInfoAcc) throw new Error('UserInfo missing: run set_referrer/init flow first');
+  const configAcc = await conn.getAccountInfo(configPda);
   if (!configAcc) throw new Error('Config missing: initialize bridge first');
-
-  const projectWalletOffset = 8 + 32 * 3;
-  const projectWallet = new PublicKey(configAcc.data.slice(projectWalletOffset, projectWalletOffset + 32));
 
   const totalRevenueOffset = 8 + 32 * 6 + 1;
   const totalRevenue = configAcc.data.readBigUInt64LE(totalRevenueOffset);
@@ -90,7 +81,6 @@ async function main() {
   );
 
   const userUsdcAta = getAssociatedTokenAddressSync(usdcMint, user.publicKey);
-  const projectTokenAccount = getAssociatedTokenAddressSync(usdcMint, projectWallet);
 
   const amountRaw = BigInt(Math.floor(cfg.amountUsdc * 1_000_000));
   const amountBuf = Buffer.alloc(8);
@@ -106,8 +96,6 @@ async function main() {
       { pubkey: vaultTokenPda, isSigner: false, isWritable: true },
       { pubkey: vaultAuthorityPda, isSigner: false, isWritable: false },
       { pubkey: configPda, isSigner: false, isWritable: true },
-      { pubkey: userInfoPda, isSigner: false, isWritable: true },
-      { pubkey: projectTokenAccount, isSigner: false, isWritable: true },
       { pubkey: crossChainMsgPda, isSigner: false, isWritable: true },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },

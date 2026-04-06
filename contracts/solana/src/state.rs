@@ -106,28 +106,11 @@ pub struct CrossChainMessage {
     /// Original amount
     pub original_amount: u64,
     
-    /// Cross-chain amount (ecosystem funds 30%)
+    /// Cross-chain amount (current inbound model: 100% of original_amount)
     pub amount: u64,
     
     /// Seth chain recipient address
     pub seth_recipient: [u8; 20],
-    
-    // ===== Distribution Details =====
-    
-    /// L1 commission
-    pub commission_l1: u64,
-    
-    /// L2 commission
-    pub commission_l2: u64,
-    
-    /// Project funds (50%) - already distributed locally
-    pub project_funds: u64,
-    
-    /// L1 referrer
-    pub l1_referrer: Option<Pubkey>,
-    
-    /// L2 referrer
-    pub l2_referrer: Option<Pubkey>,
     
     /// Status
     pub status: CrossChainStatus,

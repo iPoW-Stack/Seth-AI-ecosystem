@@ -4,8 +4,7 @@
  * Notes:
  * - Calls seth_bridge::process_revenue and transfers a USDC amount into Vault.
  * - Creates a CrossChainMessage for Seth-side processing by relayer.
- * - Current split: L1(10%), L2(5%), project(50%), ecosystem(35%).
- * - L1/L2 commissions are recorded and distributed via distribute_commission.
+ * - Current model: 100% of inbound amount is treated as ecosystem funds.
  * - This script only validates transaction construction and on-chain execution.
  *
  * Usage:
@@ -83,7 +82,7 @@ async function main() {
 
   const programId = new PublicKey("GmfLWKJuTgyaNvro91Vd8mwg8BXccgXS3jZ4WTjsAan5");
 
-  // 2. Derive config / vault / user-info / cross-chain PDAs
+  // 2. Derive config / vault / cross-chain PDAs
   const [configPda] = PublicKey.findProgramAddressSync(
     [Buffer.from('config')],
     programId
@@ -96,37 +95,17 @@ async function main() {
     [Buffer.from('vault_token_account')],
     programId
   );
-  const [userInfoPda] = PublicKey.findProgramAddressSync(
-    [Buffer.from('user_info'), payer.publicKey.toBuffer()],
-    programId
-  );
 
   console.log('Config PDA:', configPda.toBase58());
   console.log('Vault Authority PDA:', vaultAuthorityPda.toBase58());
   console.log('Vault Token Account PDA:', vaultTokenPda.toBase58());
-  console.log('UserInfo PDA:', userInfoPda.toBase58());
 
-  // Fetch user_info and config from chain
-  const [userInfoAcc, configAcc] = await Promise.all([
-    connection.getAccountInfo(userInfoPda),
-    connection.getAccountInfo(configPda),
-  ]);
-  if (!userInfoAcc) {
-    throw new Error('UserInfo is not initialized; run test-set-referrer.js first');
-  }
+  // Fetch config from chain
+  const configAcc = await connection.getAccountInfo(configPda);
   if (!configAcc) {
     throw new Error('Config is not initialized; deploy and initialize bridge first');
   }
 
-  // Config layout:
-  // 8 discriminator + 32 owner + 32 seth_treasury + 32 team_wallet + 32 project_wallet + 
-  // 32 vault_authority + 32 relayer + 1 bump + 8 total_revenue + ...
-  const configData = configAcc.data;
-  const projectWalletOffset = 8 + 32 * 3; // discriminator + owner + seth_treasury + team_wallet
-  const projectWalletBytes = configData.slice(projectWalletOffset, projectWalletOffset + 32);
-  const projectWallet = new PublicKey(projectWalletBytes);
-  console.log('Project Wallet (from config):', projectWallet.toBase58());
-  
   const totalRevenueOffset = 8 + 32 * 6 + 1;
   const totalRevenue = configAcc.data.readBigUInt64LE(totalRevenueOffset);
   const totalRevenueBytes = Buffer.alloc(8);
@@ -148,12 +127,6 @@ async function main() {
   );
   console.log('User USDC ATA:', userUsdcAta.toBase58());
   
-  // Project USDC receiving account (ATA derived from config.project_wallet)
-  const projectTokenAccount = getAssociatedTokenAddressSync(
-    USDC_MINT,
-    projectWallet
-  );
-  console.log('Project Token Account (from config.project_wallet):', projectTokenAccount.toBase58());
   console.log('');
 
   // 4. Build instruction data
@@ -177,9 +150,8 @@ async function main() {
   ]);
 
   // 5. Prepare account metas (must match ProcessRevenue<'info> order)
-  // New contract structure is simplified and no longer requires l1/l2/team accounts
-  // Account order: user, user_token_account, vault_token_account, vault_authority, config, user_info,
-  //          project_token_account, cross_chain_message, token_program, system_program
+  // Account order: user, user_token_account, vault_token_account, vault_authority,
+  //          config, cross_chain_message, token_program, system_program
   const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
 
   const keys = [
@@ -188,8 +160,6 @@ async function main() {
     { pubkey: vaultTokenPda,       isSigner: false, isWritable: true },  // vault_token_account
     { pubkey: vaultAuthorityPda,   isSigner: false, isWritable: false }, // vault_authority
     { pubkey: configPda,           isSigner: false, isWritable: true },  // config
-    { pubkey: userInfoPda,         isSigner: false, isWritable: true },  // user_info
-    { pubkey: projectTokenAccount, isSigner: false, isWritable: true },  // project_token_account (50% realtime transfer)
     { pubkey: crossChainMsgPda,    isSigner: false, isWritable: true },  // cross_chain_message
     { pubkey: TOKEN_PROGRAM_ID,    isSigner: false, isWritable: false }, // token_program
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
@@ -216,11 +186,8 @@ async function main() {
   console.log('\n========================================');
   console.log('Transaction completed!');
   console.log('========================================');
-  console.log('Split details (based on ' + TEST_AMOUNT_USDC + ' USDC):');
-  console.log('  - L1 commission (10%):', (TEST_AMOUNT_USDC * 0.1).toFixed(2), 'USDC - recorded on-chain, distributed via distribute_commission');
-  console.log('  - L2 commission (5%):', (TEST_AMOUNT_USDC * 0.05).toFixed(2), 'USDC - recorded on-chain, distributed via distribute_commission');
-  console.log('  - Project reserve (50%):', (TEST_AMOUNT_USDC * 0.5).toFixed(2), 'USDC - transferred to project_token_account in realtime');
-  console.log('  - Ecosystem funds (35%):', (TEST_AMOUNT_USDC * 0.35).toFixed(2), 'USDC - sent to Seth via cross-chain message');
+  console.log('Distribution details (based on ' + TEST_AMOUNT_USDC + ' USDC):');
+  console.log('  - Ecosystem funds (100%):', TEST_AMOUNT_USDC.toFixed(2), 'USDC - sent to Seth via cross-chain message');
   console.log('\nCheck relayer logs for RevenueProcessed detection.');
 }
 

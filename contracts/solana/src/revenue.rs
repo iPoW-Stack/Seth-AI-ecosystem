@@ -1,4 +1,4 @@
-//! Revenue Module - Handles revenue distribution logic (10-5-5-50-30)
+//! Revenue Module - Handles revenue distribution logic
 //! 
 //! Features:
 //! - Revenue processing and distribution
@@ -10,8 +10,7 @@ use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 use crate::{
     Config, VaultAuthority, UserInfo, CrossChainMessage, CrossChainStatus,
-    COMMISSION_L1_RATE, COMMISSION_L2_RATE,
-    PROJECT_RESERVE_RATE, ECOSYSTEM_RATE, BASIS_POINTS,
+    BASIS_POINTS, INBOUND_ECOSYSTEM_RATE,
 };
 use crate::{BridgeError};
 use crate::{RevenueProcessed, CommissionWithdrawn, MonthlySettlement};
@@ -19,8 +18,8 @@ use crate::bridge::transfer_from_vault;
 
 // ==================== Revenue Processing ====================
 
-/// Process revenue and execute distribution
-/// L1/L2 commissions are recorded and distributed via separate instruction
+/// Process revenue and execute inbound distribution.
+/// Current model: 100% of `amount` becomes cross-chain ecosystem funds.
 #[derive(Accounts)]
 #[instruction(amount: u64, seth_recipient: [u8; 20])]
 pub struct ProcessRevenue<'info> {
@@ -50,19 +49,6 @@ pub struct ProcessRevenue<'info> {
     )]
     pub config: Account<'info, Config>,
     
-    /// User info (must be registered)
-    #[account(
-        mut,
-        seeds = [b"user_info", user.key().as_ref()],
-        bump,
-        constraint = user_info.is_registered @ BridgeError::UserNotRegistered
-    )]
-    pub user_info: Account<'info, UserInfo>,
-    
-    /// Project USDC account (50% - real-time transfer)
-    #[account(mut)]
-    pub project_token_account: Account<'info, TokenAccount>,
-    
     /// Cross-chain message record
     #[account(
         init,
@@ -77,8 +63,11 @@ pub struct ProcessRevenue<'info> {
     pub system_program: Program<'info, System>,
 }
 
-/// Process revenue distribution logic
-/// Commissions are recorded in user_info.pending_commission for later withdrawal
+/// Process revenue distribution logic.
+/// Inbound simplification:
+/// - No L1/L2 referral split
+/// - No project-reserve transfer
+/// - `ecosystem_funds == amount`
 pub fn handle_process_revenue(
     ctx: Context<ProcessRevenue>,
     amount: u64,
@@ -99,63 +88,26 @@ pub fn handle_process_revenue(
         amount,
     )?;
 
-    // 2. Calculate each portion (10-5-0-50-35)
-    let commission_l1 = (amount * COMMISSION_L1_RATE) / BASIS_POINTS;
-    let commission_l2 = (amount * COMMISSION_L2_RATE) / BASIS_POINTS;
-    let project_funds = (amount * PROJECT_RESERVE_RATE) / BASIS_POINTS;
-    let ecosystem_funds = (amount * ECOSYSTEM_RATE) / BASIS_POINTS;
-
-    // 3. Get referrer info
-    let has_l1 = ctx.accounts.user_info.referrer != Pubkey::default();
-    let l1_referrer = if has_l1 {
-        Some(ctx.accounts.user_info.referrer)
-    } else {
-        None
-    };
+    // 2. Full passthrough to cross-chain ecosystem amount.
+    let ecosystem_funds = (amount * INBOUND_ECOSYSTEM_RATE) / BASIS_POINTS;
     
-    // 4. Distribute project funds (real-time transfer)
-    if project_funds > 0 {
-        transfer_from_vault(
-            &ctx.accounts.vault_token_account.to_account_info(),
-            &ctx.accounts.project_token_account.to_account_info(),
-            &ctx.accounts.vault_authority.to_account_info(),
-            &ctx.accounts.token_program.to_account_info(),
-            project_funds,
-            ctx.accounts.config.bump,
-        )?;
-    }
-    
-    // 5. Record cross-chain message (35% ecosystem)
-    // Commissions L1/L2 will be distributed via separate distribute_commission instruction
+    // 3. Record cross-chain message (100% ecosystem).
     let cross_chain_msg = &mut ctx.accounts.cross_chain_message;
     cross_chain_msg.sender = ctx.accounts.user.key();
     cross_chain_msg.amount = ecosystem_funds;
     cross_chain_msg.original_amount = amount;
     cross_chain_msg.seth_recipient = seth_recipient;
-    cross_chain_msg.l1_referrer = l1_referrer;
-    cross_chain_msg.l2_referrer = None;
-    cross_chain_msg.commission_l1 = commission_l1;
-    cross_chain_msg.commission_l2 = commission_l2;
-    cross_chain_msg.project_funds = project_funds;
     cross_chain_msg.status = CrossChainStatus::Pending;
     cross_chain_msg.created_at = Clock::get()?.unix_timestamp;
 
-    // 6. Update statistics
+    // 4. Update statistics
     ctx.accounts.config.total_revenue += amount;
 
-    // 7. Update user statistics
-    ctx.accounts.user_info.total_volume += amount;
-
-    // 8. Emit event
+    // 5. Emit event
     emit!(RevenueProcessed {
         user: ctx.accounts.user.key(),
         amount,
-        commission_l1,
-        commission_l2,
-        project_funds,
         ecosystem_funds,
-        l1_referrer,
-        l2_referrer: None,
         seth_recipient,
         timestamp: Clock::get()?.unix_timestamp,
     });

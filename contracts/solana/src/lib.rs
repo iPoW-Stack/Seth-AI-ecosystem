@@ -75,7 +75,7 @@ pub mod seth_bridge {
 
     // ==================== Revenue Instructions ====================
 
-    /// Process revenue and execute 15-50-35 distribution
+    /// Process inbound revenue: 100% of amount goes to cross-chain ecosystem flow
     pub fn process_revenue(
         ctx: Context<ProcessRevenue>,
         amount: u64,

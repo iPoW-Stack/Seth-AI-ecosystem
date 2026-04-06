@@ -2,20 +2,8 @@
 
 // ==================== Distribution Ratios (Basis Points, 10000 = 100%) ====================
 
-/// L1 referrer commission rate: 10%
-pub const COMMISSION_L1_RATE: u64 = 1000;
-
-/// L2 referrer commission rate: 5%
-pub const COMMISSION_L2_RATE: u64 = 500;
-
-/// Total commission rate: 15%
-pub const TOTAL_COMMISSION_RATE: u64 = 1500;
-
-/// Project reserve rate: 50%
-pub const PROJECT_RESERVE_RATE: u64 = 5000;
-
-/// Ecosystem cross-chain funds rate: 35%
-pub const ECOSYSTEM_RATE: u64 = 3500;
+/// Inbound ecosystem rate: 100% (amount passthrough).
+pub const INBOUND_ECOSYSTEM_RATE: u64 = 10000;
 
 /// Basis points precision
 pub const BASIS_POINTS: u64 = 10000;

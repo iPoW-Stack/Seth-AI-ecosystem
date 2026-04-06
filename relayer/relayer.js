@@ -757,7 +757,8 @@ class BridgeRelayer {
 
     /**
      * Parse RevenueProcessed from raw Anchor event bytes (Program data payload).
-     * Must match `contracts/solana/src/events.rs` (Borsh): no product_type field.
+     * New layout:
+     * sender(32) + amount(8) + ecosystem_funds(8) + seth_recipient(20) + timestamp(8)
      */
     parseRevenueProcessedEventBuffer(buffer) {
         try {
@@ -768,37 +769,12 @@ class BridgeRelayer {
             if (buffer.length < offset + 32) return null;
             const sender = new PublicKey(buffer.slice(offset, offset + 32)).toString();
             offset += 32;
-
-            if (buffer.length < offset + 8 * 5) return null;
+            if (buffer.length < offset + 8 + 8 + 20 + 8) return null;
             const originalAmount = buffer.readBigUInt64LE(offset);
             offset += 8;
-            offset += 8; // commission_l1
-            offset += 8; // commission_l2
-            offset += 8; // project_funds
             const ecosystemFunds = buffer.readBigUInt64LE(offset);
             offset += 8;
-
-            if (buffer.length < offset + 1) return null;
-            const l1Tag = buffer.readUInt8(offset);
-            offset += 1;
-            if (l1Tag === 1) {
-                if (buffer.length < offset + 32) return null;
-                offset += 32;
-            } else if (l1Tag !== 0) return null;
-
-            if (buffer.length < offset + 1) return null;
-            const l2Tag = buffer.readUInt8(offset);
-            offset += 1;
-            if (l2Tag === 1) {
-                if (buffer.length < offset + 32) return null;
-                offset += 32;
-            } else if (l2Tag !== 0) return null;
-
-            if (buffer.length < offset + 20 + 8) return null;
-
-            const recipientEthBytes = buffer.slice(offset, offset + 20);
-            const recipientEth = '0x' + recipientEthBytes.toString('hex');
-
+            const recipientEth = '0x' + buffer.slice(offset, offset + 20).toString('hex');
             return {
                 amount: ecosystemFunds.toString(),
                 originalAmount: originalAmount.toString(),
@@ -1016,11 +992,8 @@ class BridgeRelayer {
     /**
      * Process single message - call Seth bridge contract
      * 
-     * Distribution scheme (10-5-0-50-35):
-     * - L1 Commission (10%) -> Solana real-time transfer to referrer
-     * - L2 Commission (5%)  -> Solana real-time transfer to L2 referrer
-     * - Project Reserve (50%) -> Solana real-time transfer to Gnosis Safe
-     * - Cross-chain Ecosystem (35%) -> Cross-chain to PoolB (amount field)
+     * Inbound distribution scheme (simplified):
+     * - Cross-chain Ecosystem (100%) -> Cross-chain to PoolB (amount field)
      */
     async processMessage(message) {
         const { id, solana_tx_sig, solana_tx_sig_bytes32, amount, recipient_eth } = message;
@@ -1030,7 +1003,7 @@ class BridgeRelayer {
             await this.db.logOperation(id, 'process', { attempt: message.retry_count + 1 });
 
             console.log(`[Relayer] Processing message ${id}: ${solana_tx_sig}`);
-            console.log(`[Relayer]   Ecosystem Amount (35%): ${amount}`);
+            console.log(`[Relayer]   Ecosystem Amount (100%): ${amount}`);
             console.log(`[Relayer]   Recipient: ${recipient_eth}`);
 
             // Cross-chain fund processing:
