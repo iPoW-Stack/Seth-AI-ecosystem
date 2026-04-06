@@ -294,7 +294,7 @@ pub struct UnlockFromSeth<'info> {
     pub recipient_token_account: Account<'info, TokenAccount>,
     
     #[account(
-        init,
+        init_if_needed,
         payer = relayer,
         space = 8 + SethUnlockReceipt::INIT_SPACE,
         seeds = [b"seth_unlock", bridge_address.as_ref(), request_id.to_le_bytes().as_ref()],
@@ -322,7 +322,19 @@ pub fn handle_unlock_from_seth(
         ctx.accounts.recipient_token_account.mint == ctx.accounts.vault_token_account.mint,
         BridgeError::InvalidAccount
     );
-    
+
+    // Idempotent: relayer retries must not re-init the PDA (init -> "already in use");
+    // if this unlock was already recorded, succeed without transferring again.
+    {
+        let r = &ctx.accounts.unlock_receipt;
+        if r.request_id == request_id
+            && r.bridge_address == bridge_address
+            && r.processed_at != 0
+        {
+            return Ok(());
+        }
+    }
+
     transfer_from_vault(
         &ctx.accounts.vault_token_account.to_account_info(),
         &ctx.accounts.recipient_token_account.to_account_info(),

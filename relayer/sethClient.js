@@ -348,6 +348,8 @@ class SethClient {
         const nextNonce = currentNonce + 1;
         // Merge params with defaults
         const DEFAULT_CONTRACT_PREPAYMENT = 100_000_000;
+        /** Extra pepay when `to` is Seth bridge (SETH_BRIDGE_ADDRESS), on top of default step-8 prepayment. */
+        const BRIDGE_ADDRESS_PREPAYMENT_EXTRA = 400_000_000;
         const finalParams = {
             amount: 0,
             gas_limit: 100000,
@@ -366,6 +368,13 @@ class SethClient {
         };
         if (finalParams.step === 8 && !Object.prototype.hasOwnProperty.call(txParams, 'prepayment')) {
             finalParams.prepayment = DEFAULT_CONTRACT_PREPAYMENT;
+            const bridgeAddr = (process.env.SETH_BRIDGE_ADDRESS || '')
+                .trim()
+                .toLowerCase()
+                .replace(/^0x/, '');
+            if (bridgeAddr && normalizedTo === bridgeAddr) {
+                finalParams.prepayment += BRIDGE_ADDRESS_PREPAYMENT_EXTRA;
+            }
         }
 
         // --- 3. Compute Hash ---

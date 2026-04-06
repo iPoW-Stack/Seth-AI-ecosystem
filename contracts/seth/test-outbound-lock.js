@@ -179,11 +179,10 @@ async function main() {
   }
 
   const requestId = after;
-  const req = await client.getWithdrawRequest(userAddress, bridge, requestId);
   const requestKey = await client.getWithdrawRequestKey(userAddress, bridge, requestId);
 
   console.log(`[outbound-js] request_id: ${requestId}`);
-  console.log(`[outbound-js] request: ${JSON.stringify(req)}`);
+  console.log('[outbound-js] request: (not queried; getWithdrawRequest disabled on this chain)');
   console.log(`[outbound-js] lock/withdraw request key: ${requestKey}`);
   console.log('[outbound-js] next: ensure relayer is running to complete Solana unlock');
 }

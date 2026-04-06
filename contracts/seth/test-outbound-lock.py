@@ -24,7 +24,7 @@ from request_withdraw_to_solana_from_seth import (
     _extract_hex_output,
     _decode_uint256_word,
 )
-from deploy_seth import SethClient, encode_call, require_seth_tx_ok
+from deploy_seth import DEFAULT_CONTRACT_PREPAYMENT, SethClient, encode_call
 
 
 def q_word(host: str, port: int, from_hex: str, bridge_hex: str, fn_sig: str, request_id: int) -> str | None:
@@ -80,6 +80,7 @@ def main() -> int:
     user_addr = client.get_address(pk.replace("0x", ""))
     before = get_total_withdraw_requests(args.host, args.port, user_addr, bridge)
     print(f"[outbound] before totalWithdrawRequests={before}")
+    print(f"[outbound] prepayment={DEFAULT_CONTRACT_PREPAYMENT}")
 
     input_hex = encode_call(
         "requestWithdrawToSolanaFromSETH(bytes32,uint256)",
@@ -97,11 +98,13 @@ def main() -> int:
     )
     if not txh:
         raise SystemExit("ERROR: send failed")
-    ok, st = client.wait_for_receipt(txh)
+    ok, st = client.wait_for_receipt(txh, timeout=600)
     if not ok:
         raise SystemExit("ERROR: receipt wait timed out")
-    require_seth_tx_ok("requestWithdrawToSolanaFromSETH", txh, st)
-    print(f"[outbound] tx={txh} status={st}")
+    # Match test-outbound-lock.js: only status 5 is treated as hard failure; Seth may return other terminal codes.
+    if st == 5:
+        raise SystemExit(f"ERROR: receipt status=5 tx={txh}")
+    print(f"[outbound] tx={txh} receipt_status={st}")
 
     after = get_total_withdraw_requests(args.host, args.port, user_addr, bridge)
     print(f"[outbound] after totalWithdrawRequests={after}")

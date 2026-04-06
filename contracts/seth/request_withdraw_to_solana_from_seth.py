@@ -93,20 +93,15 @@ def get_total_withdraw_requests(host: str, port: int, from_hex: str, bridge_hex:
     return _decode_uint256_word(out, 0)
 
 
-def get_withdraw_request(host: str, port: int, from_hex: str, bridge_hex: str, request_id: int) -> dict | None:
-    call_hex = encode_call("getWithdrawRequest(uint256)", ["uint256"], [request_id])
-    raw = query_contract_raw(host, port, from_hex, bridge_hex, call_hex)
-    out = _extract_hex_output(raw or "")
-    # (address, bytes32, uint256, uint256, bool) => 5 words
-    if not out or len(out) < 64 * 5:
-        return None
-    return {
-        "user": "0x" + out[24:64],
-        "solanaRecipient": "0x" + out[64:128],
-        "susdcAmount": _decode_uint256_word(out, 2),
-        "createdAt": _decode_uint256_word(out, 3),
-        "processed": _decode_uint256_word(out, 4) != 0,
-    }
+def get_withdraw_request(
+    _host: str,
+    _port: int,
+    _from_hex: str,
+    _bridge_hex: str,
+    _request_id: int,
+) -> dict | None:
+    """Disabled: Seth does not support getWithdrawRequest(uint256) via query_contract. Use receipt events / relayer."""
+    return None
 
 
 def parse_hex32(s: str) -> bytes:
